@@ -65,7 +65,12 @@ async def on_fetch(request, env):
 
     # Preflight CORS
     if method == "OPTIONS":
-        return _response_json("", 204)
+        h = Headers.new()
+        h.set("Access-Control-Allow-Origin", "*")
+        h.set("Access-Control-Allow-Methods", "POST, OPTIONS")
+        h.set("Access-Control-Allow-Headers", "*")
+        return Response.new("", {"status": 204, "headers": h})
+
 
     # Routing API
     if method == "POST" and path == "/api/hash":
