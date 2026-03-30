@@ -3,10 +3,3 @@ main = "worker.py"
 compatibility_date = "2024-01-01"
 compatibility_flags = ["python_workers"]
 
-[build]
-command = ""
-
-[[rules]]
-type = "PythonWorker"
-globs = ["**/*.py"]
-fallthrough = true

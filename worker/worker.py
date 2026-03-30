@@ -12,6 +12,8 @@ from datetime import datetime, timezone
 from js import Response, Headers
 import hmac
 import base64
+from urllib.parse import urlparse
+import json
 
 ALLOWED_MIME = {
     "image/jpeg", "image/png", "image/gif",
@@ -57,26 +59,28 @@ def _sign_hmac(secret: str, message: str) -> str:
     sig = hmac.new(key, msg, hashlib.sha256).digest()
     return base64.b64encode(sig).decode("ascii")
 
-
 async def on_fetch(request, env):
     method = request.method
-    path = request.url.pathname
+
+    # 🔥 request.url è una stringa → va parsata
+    parsed = urlparse(request.url)
+    path = parsed.path
 
     if method == "OPTIONS":
         return _response_json("", 204)
 
-    # API
-    if method == "POST" and path.startswith("/api/hash"):
+    if method == "POST" and path == "/api/hash":
         return await _handle_hash(request, env)
 
-    if method == "POST" and path.startswith("/api/verify"):
+    if method == "POST" and path == "/api/verify":
         return await _handle_verify(request)
 
-    if method == "POST" and path.startswith("/api/cert-pdf"):
+    if method == "POST" and path == "/api/cert-pdf":
         return await _handle_pdf(request)
 
-    # STATIC FILES
-    return await env.ASSETS.fetch(request)
+    return _response_json(
+        json.dumps({"error": "Endpoint API non trovato"}), 404)
+    
 
 
 async def _handle_hash(request, env):
