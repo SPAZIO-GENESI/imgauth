@@ -65,6 +65,7 @@ async def on_fetch(request, env):
     if method == "OPTIONS":
         return _response_json("", 204)
 
+    # API
     if method == "POST" and path.startswith("/api/hash"):
         return await _handle_hash(request, env)
 
@@ -74,7 +75,8 @@ async def on_fetch(request, env):
     if method == "POST" and path.startswith("/api/cert-pdf"):
         return await _handle_pdf(request)
 
-    return _response_json(json.dumps({"error": "Not found"}), 404)
+    # STATIC FILES
+    return await env.ASSETS.fetch(request)
 
 
 async def _handle_hash(request, env):
