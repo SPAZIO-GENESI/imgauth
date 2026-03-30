@@ -13,7 +13,6 @@ from js import Response, Headers
 import hmac
 import base64
 from urllib.parse import urlparse
-import json
 
 ALLOWED_MIME = {
     "image/jpeg", "image/png", "image/gif",
@@ -26,31 +25,28 @@ MONTHS_IT = [
 ]
 
 
-def _make_headers_json():
+def _response_json(body, status=200):
+    # Garantisce che il body sia SEMPRE una stringa JSON valida
+    if not isinstance(body, str):
+        body = json.dumps(body, ensure_ascii=False)
+
     h = Headers.new()
     h.set("Content-Type", "application/json; charset=utf-8")
     h.set("Access-Control-Allow-Origin", "*")
     h.set("Access-Control-Allow-Methods", "POST, OPTIONS")
     h.set("Access-Control-Allow-Headers", "*")
-    return h
+
+    return Response.new(body, {"status": status, "headers": h})
 
 
-def _make_headers_pdf():
+def _response_pdf(body_bytes, status=200):
     h = Headers.new()
     h.set("Content-Type", "application/pdf")
     h.set("Access-Control-Allow-Origin", "*")
     h.set("Access-Control-Allow-Methods", "POST, OPTIONS")
     h.set("Access-Control-Allow-Headers", "*")
-    return h
 
-
-def _response_json(body, status=200):
-    return Response.new(body, {"status": status, "headers": _make_headers_json()})
-
-
-def _response_pdf(body_bytes, status=200):
-    # body_bytes deve essere bytes
-    return Response.new(body_bytes, {"status": status, "headers": _make_headers_pdf()})
+    return Response.new(body_bytes, {"status": status, "headers": h})
 
 
 def _sign_hmac(secret: str, message: str) -> str:
@@ -59,16 +55,19 @@ def _sign_hmac(secret: str, message: str) -> str:
     sig = hmac.new(key, msg, hashlib.sha256).digest()
     return base64.b64encode(sig).decode("ascii")
 
+
 async def on_fetch(request, env):
     method = request.method
 
-    # 🔥 request.url è una stringa → va parsata
     parsed = urlparse(request.url)
     path = parsed.path
+    print("DEBUG PATH:", path, "METHOD:", method)
 
+    # Preflight CORS
     if method == "OPTIONS":
         return _response_json("", 204)
 
+    # Routing API
     if method == "POST" and path == "/api/hash":
         return await _handle_hash(request, env)
 
@@ -78,9 +77,8 @@ async def on_fetch(request, env):
     if method == "POST" and path == "/api/cert-pdf":
         return await _handle_pdf(request)
 
-    return _response_json(
-        json.dumps({"error": "Endpoint API non trovato"}), 404)
-    
+    # Default
+    return _response_json({"error": "Endpoint API non trovato"}, 404)
 
 
 async def _handle_hash(request, env):
@@ -89,17 +87,13 @@ async def _handle_hash(request, env):
         file = form.get("image")
 
         if file is None:
-            return _response_json(
-                json.dumps({"error": "Campo 'image' mancante nel form."}), 400
-            )
+            return _response_json({"error": "Campo 'image' mancante nel form."}, 400)
 
         mime = str(file.type) if hasattr(file, "type") else "application/octet-stream"
         name = str(file.name) if hasattr(file, "name") else "opera"
 
         if mime not in ALLOWED_MIME:
-            return _response_json(
-                json.dumps({"error": f"Tipo non supportato: {mime}"}), 415
-            )
+            return _response_json({"error": f"Tipo non supportato: {mime}"}, 415)
 
         array_buffer = await file.arrayBuffer()
         raw = bytes(array_buffer)
@@ -116,7 +110,6 @@ async def _handle_hash(request, env):
         attestazione = f"SHA-256:{digest}@{ts_iso}"
         issuer = "Spazio Genesi ETS — Attestazione Opere"
 
-        # HMAC lato server (imposta HMAC_SECRET in wrangler.toml → [vars])
         secret = getattr(env, "HMAC_SECRET", None)
         hmac_sig = _sign_hmac(secret, attestazione) if secret else None
 
@@ -132,12 +125,10 @@ async def _handle_hash(request, env):
             "hmac": hmac_sig,
         }
 
-        return _response_json(json.dumps(payload, ensure_ascii=False), 200)
+        return _response_json(payload, 200)
 
     except Exception as exc:
-        return _response_json(
-            json.dumps({"error": f"Errore interno: {str(exc)}"}), 500
-        )
+        return _response_json({"error": f"Errore interno: {str(exc)}"}, 500)
 
 
 async def _handle_verify(request):
@@ -147,9 +138,7 @@ async def _handle_verify(request):
         claimed = form.get("hash")
 
         if file is None or claimed is None:
-            return _response_json(
-                json.dumps({"error": "Richiesti 'image' e 'hash'."}), 400
-            )
+            return _response_json({"error": "Richiesti 'image' e 'hash'."}, 400)
 
         claimed = str(claimed).strip().lower()
 
@@ -165,18 +154,13 @@ async def _handle_verify(request):
             "coincide": ok,
         }
 
-        return _response_json(json.dumps(payload, ensure_ascii=False), 200)
+        return _response_json(payload, 200)
 
     except Exception as exc:
-        return _response_json(
-            json.dumps({"error": f"Errore interno: {str(exc)}"}), 500
-        )
+        return _response_json({"error": f"Errore interno: {str(exc)}"}, 500)
 
 
 def _build_simple_pdf(text_lines):
-    # PDF minimale (una pagina, testo monospazio base)
-    # Non è tipograficamente raffinato, ma è valido.
-    # text_lines: lista di stringhe
     content_stream = "BT /F1 10 Tf 50 780 Td\n"
     first = True
     for line in text_lines:
@@ -190,7 +174,6 @@ def _build_simple_pdf(text_lines):
     content_bytes = content_stream.encode("latin-1", "replace")
     len_content = len(content_bytes)
 
-    # Oggetti PDF
     parts = []
     xref = []
     offset = 0
@@ -206,24 +189,18 @@ def _build_simple_pdf(text_lines):
     parts.append(header.encode("latin-1"))
     offset += len(header)
 
-    # 1: Catalog
     add("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n")
-    # 2: Pages
     add("2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n")
-    # 3: Page
     add("3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n")
-    # 4: Contents
     add(f"4 0 obj\n<< /Length {len_content} >>\nstream\n")
     parts.append(content_bytes)
     offset += len_content
     parts.append(b"\nendstream\nendobj\n")
     offset += len("\nendstream\nendobj\n")
-    # 5: Font
     add("5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>\nendobj\n")
 
     xref_pos = offset
-    xref_header = f"xref\n0 {len(xref)+1}\n0 0000000000 65535 f \n"
-    parts.append(xref_header.encode("latin-1"))
+    parts.append(f"xref\n0 {len(xref)+1}\n0 0000000000 65535 f \n".encode("latin-1"))
     for off in xref:
         parts.append(f"{off:010d} 00000 n \n".encode("latin-1"))
 
@@ -236,7 +213,7 @@ def _build_simple_pdf(text_lines):
 async def _handle_pdf(request):
     try:
         data = await request.json()
-        # ci aspettiamo lo stesso payload del /api/hash
+
         opera = data.get("opera", "")
         dim = data.get("dimensione_bytes", 0)
         mime = data.get("tipo_mime", "")
@@ -261,6 +238,7 @@ async def _handle_pdf(request):
             "Stringa di attestazione:",
             f"{attest}",
         ]
+
         if hmac_sig:
             lines.append("")
             lines.append("Firma HMAC (server):")
@@ -274,6 +252,4 @@ async def _handle_pdf(request):
         return _response_pdf(pdf_bytes, 200)
 
     except Exception as exc:
-        return _response_json(
-            json.dumps({"error": f"Errore interno PDF: {str(exc)}"}), 500
-        )
+        return _response_json({"error": f"Errore interno PDF: {str(exc)}"}, 500)

@@ -587,7 +587,7 @@
     try {
       const fd = new FormData();
       fd.append("image", selectedFile);
-      const res = await fetch(WORKER_HASH_URL, { method: "POST", body: fd });
+      const res = await fetch(WORKER_HASH_URL, { method: "POST", body: fd, mode: "cors" });
       const d = await res.json();
       if (!res.ok) {
         showErr(d.error || "Errore " + res.status);
