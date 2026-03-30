@@ -62,6 +62,13 @@ async def on_fetch(request, env):
     method = request.method
     path = request.url.pathname
 
+    # --- NUOVO: Gestione richieste per /docs (GitHub Pages) ---
+    # Se la richiesta è per la cartella /docs, lascia passare a GitHub Pages
+    if path.startswith('/docs/') or path == '/docs' or path == '/docs/':
+        # Passa la richiesta al server origin (GitHub Pages)
+        return await fetch(request)
+    # --- FINE NUOVO BLOCCO ---
+
     if method == "OPTIONS":
         return _response_json("", 204)
 
