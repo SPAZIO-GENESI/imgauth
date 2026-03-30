@@ -95,8 +95,8 @@ async def _handle_hash(request, env):
         if mime not in ALLOWED_MIME:
             return _response_json({"error": f"Tipo non supportato: {mime}"}, 415)
 
-        array_buffer = await file.arrayBuffer()
-        raw = bytes(array_buffer)
+        raw = await file.bytes()
+
         digest = hashlib.sha256(raw).hexdigest()
         size = len(raw)
 
@@ -142,8 +142,8 @@ async def _handle_verify(request):
 
         claimed = str(claimed).strip().lower()
 
-        array_buffer = await file.arrayBuffer()
-        raw = bytes(array_buffer)
+        raw = await file.bytes()
+
         digest = hashlib.sha256(raw).hexdigest()
 
         ok = (digest == claimed)
