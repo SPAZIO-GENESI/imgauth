@@ -55,24 +55,41 @@ def _sign_hmac(secret: str, message: str) -> str:
     sig = hmac.new(key, msg, hashlib.sha256).digest()
     return base64.b64encode(sig).decode("ascii")
 
-
 async def on_fetch(request, env):
-    method = request.method
+    method = str(request.method).upper()
+    
+    h = Headers.new()
+    h.set("Access-Control-Allow-Origin", "*")
+    h.set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
+    h.set("Access-Control-Allow-Headers", "*")
+    
+    if method == "OPTIONS":
+        return Response.new("", {"status": 204, "headers": h})
+    
+    h.set("Content-Type", "application/json")
+    return Response.new('{"ok": true}', {"status": 200, "headers": h})
 
-    parsed = urlparse(request.url)
-    path = parsed.path
-    print("DEBUG PATH:", path, "METHOD:", method)
+"""
+async def on_fetch(request, env):
+    method = str(request.method).upper().strip()
 
-    # Preflight CORS
+    # CORS preflight — confronto robusto su stringa Python nativa
     if method == "OPTIONS":
         h = Headers.new()
         h.set("Access-Control-Allow-Origin", "*")
-        h.set("Access-Control-Allow-Methods", "POST, OPTIONS")
+        h.set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
         h.set("Access-Control-Allow-Headers", "*")
+        h.set("Access-Control-Max-Age", "86400")
         return Response.new("", {"status": 204, "headers": h})
 
+    try:
+        parsed = urlparse(str(request.url))
+        path = str(parsed.path).strip()
+    except Exception:
+        path = ""
 
-    # Routing API
+    print("DEBUG METHOD:", repr(method), "PATH:", repr(path))
+
     if method == "POST" and path == "/api/hash":
         return await _handle_hash(request, env)
 
@@ -82,25 +99,21 @@ async def on_fetch(request, env):
     if method == "POST" and path == "/api/cert-pdf":
         return await _handle_pdf(request)
 
-    # Default
-    return _response_json({"error": "Endpoint API non trovato"}, 404)
+    if method == "GET" and path == "/ping":
+        return _response_json({"ok": True}, 200)
 
+    return _response_json({"error": "Endpoint non trovato", "method": method, "path": path}, 404)
+"""
 
 async def _handle_hash(request, env):
     try:
-        form = await request.formData()
-        file = form.get("image")
+        js = await request.json()
+        data = js.to_py()  # ← conversione fondamentale
+        raw = base64.b64decode(data["image"])
 
-        if file is None:
-            return _response_json({"error": "Campo 'image' mancante nel form."}, 400)
+        mime = data.get("type", "application/octet-stream")
+        name = data.get("name", "opera")
 
-        mime = str(file.type) if hasattr(file, "type") else "application/octet-stream"
-        name = str(file.name) if hasattr(file, "name") else "opera"
-
-        if mime not in ALLOWED_MIME:
-            return _response_json({"error": f"Tipo non supportato: {mime}"}, 415)
-
-        raw = await file.bytes()
 
         digest = hashlib.sha256(raw).hexdigest()
         size = len(raw)

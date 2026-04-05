@@ -1,5 +1,15 @@
 name = "imgauth"
-main = "worker.py"
-compatibility_date = "2024-01-01"
-compatibility_flags = ["python_workers"]
+main = "worker.js"
+compatibility_date = "2024-09-23"
 
+# Template PDF come ArrayBuffer (import in worker.js)
+[[rules]]
+type = "Data"
+globs = ["**/*.pdf"]
+fallthrough = true
+
+# Copia archiviata: oggetti sotto il prefisso pdf/ (es. pdf/certificato_2026-04-06T14-30-00-000Z.pdf)
+# Crea il bucket su Cloudflare prima del deploy o adatta bucket_name.
+[[r2_buckets]]
+binding = "PDF_ARCHIVE"
+bucket_name = "imgauth-pdf-archive"
