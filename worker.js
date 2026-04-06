@@ -168,10 +168,23 @@ async function fillCertificatePdf(d) {
   form.getTextField("TIMEISO").setText(String(d.timestamp_iso ?? ""));
   form.getTextField("TIMELEG").setText(String(d.timestamp_leggibile ?? ""));
 
-  let attest = String(d.attestazione ?? "");
-  if (d.hmac) attest += "\n\nFirma HMAC (server):\n" + String(d.hmac);
-  if (d.emesso_da) attest += "\n\nEmesso da: " + String(d.emesso_da);
-  form.getTextField("ATTESTAZIONE").setText(attest);
+  const attestField = form.getTextField("ATTESTAZIONE");
+  attestField.enableMultiline();
+
+  const attestLines = [];
+  attestLines.push("Stringa di attestazione:");
+  attestLines.push(String(d.attestazione ?? ""));
+  if (d.hmac) {
+    attestLines.push("");
+    attestLines.push("Firma HMAC (server):");
+    attestLines.push(String(d.hmac));
+  }
+  if (d.emesso_da) {
+    attestLines.push("");
+    attestLines.push("Emesso da:");
+    attestLines.push(String(d.emesso_da));
+  }
+  attestField.setText(attestLines.join("\n"));
 
   form.flatten();
   const bytes = await doc.save();

@@ -4,6 +4,8 @@
   "description": "AUTENTICATORE DI ORIGINALITA FOTOGRAFICA",
   "main": "worker.js",
   "scripts": {
+    "deploy:preview": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/deploy-preview.ps1 -PreviewAlias test-pdf-certificato-imgauth",
+    "deploy:preview:dry": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/deploy-preview.ps1 -PreviewAlias test-pdf-certificato-imgauth -DryRun",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "repository": {
