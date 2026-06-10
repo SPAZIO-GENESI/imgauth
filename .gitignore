@@ -6,3 +6,7 @@ node_modules/
 !.dev.vars.example
 .env*
 !.env.example
+
+# artefatti di test locali
+*.pdf
+r2-cli-readback*.txt
