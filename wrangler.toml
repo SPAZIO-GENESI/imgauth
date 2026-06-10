@@ -16,3 +16,21 @@ fallthrough = true
 [[r2_buckets]]
 binding = "PDF_ARCHIVE"
 bucket_name = "imgauth-pdf-archive"
+
+# Rate limiting nativo (anti-abuso/DoS, per-IP). Vedi worker.js › fetch e
+# CLAUDE.md › Sicurezza emissione certificati. period: solo 10 o 60 secondi.
+# RL_CERT: endpoint costoso /api/cert-pdf (firma Azure + scrittura R2).
+[[ratelimits]]
+name = "RL_CERT"
+namespace_id = "1001"
+  [ratelimits.simple]
+  limit = 10
+  period = 60
+
+# RL_API: endpoint leggeri /api/hash e /api/verify.
+[[ratelimits]]
+name = "RL_API"
+namespace_id = "1002"
+  [ratelimits.simple]
+  limit = 60
+  period = 60

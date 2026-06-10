@@ -62,6 +62,31 @@ function pdfResponse(bytes) {
   });
 }
 
+// ── Rate limiting (anti-abuso/DoS) ───────────────────────────────────────────
+
+function tooManyResponse() {
+  return new Response(JSON.stringify({ error: "Troppe richieste. Riprova tra un minuto." }, null, 2), {
+    status: 429,
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+      "Retry-After": "60",
+      ...corsHeaders(),
+    },
+  });
+}
+
+// true = richiesta da bloccare. Fail-open se il binding manca (dev) o erra,
+// per non rompere il servizio: la barriera HMAC resta comunque attiva.
+async function isRateLimited(limiter, key) {
+  if (!limiter) return false;
+  try {
+    const { success } = await limiter.limit({ key });
+    return !success;
+  } catch {
+    return false;
+  }
+}
+
 // ── Entry point ──────────────────────────────────────────────────────────────
 
 export default {
@@ -73,6 +98,14 @@ export default {
     // Preflight CORS — prima di tutto
     if (method === "OPTIONS") {
       return new Response("", { status: 204, headers: corsHeaders() });
+    }
+
+    // Rate limiting per-IP, tarato sul costo dell'endpoint (vedi wrangler.toml).
+    const ip = request.headers.get("CF-Connecting-IP") || "unknown";
+    if (method === "POST" && path === "/api/cert-pdf") {
+      if (await isRateLimited(env.RL_CERT, ip)) return tooManyResponse();
+    } else if (method === "POST" && (path === "/api/hash" || path === "/api/verify")) {
+      if (await isRateLimited(env.RL_API, ip)) return tooManyResponse();
     }
 
     if (method === "GET"  && path === "/ping")        return handlePing(request);
