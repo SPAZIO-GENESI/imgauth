@@ -11,6 +11,11 @@
 import { PDFDocument, rgb, StandardFonts } from "pdf-lib";
 import { encode as encodeQR } from "uqr";
 import certTemplatePdf from "./certificato_opera_pdf_mod.pdf";
+import pkg from "./package.json";
+
+// Versione del motore: sorgente di verità unica = package.json (vedi CLAUDE.md › Versioning).
+// Compare in /ping e nel blocco attestazione del certificato PDF.
+const APP_VERSION = pkg.version;
 
 const MONTHS_IT = [
   "", "gennaio", "febbraio", "marzo", "aprile", "maggio", "giugno",
@@ -75,7 +80,7 @@ export default {
 // ── /ping ────────────────────────────────────────────────────────────────────
 
 function handlePing(request) {
-  return jsonResponse({ ok: true, origin: request.headers.get("Origin") });
+  return jsonResponse({ ok: true, version: APP_VERSION, origin: request.headers.get("Origin") });
 }
 
 // ── /api/hash ────────────────────────────────────────────────────────────────
@@ -195,6 +200,9 @@ async function fillCertificatePdf(d) {
     attestLines.push("Emesso da:");
     attestLines.push(String(d.emesso_da));
   }
+  attestLines.push("");
+  attestLines.push("Versione motore:");
+  attestLines.push(`imgauth v${APP_VERSION}`);
   attestField.setText(attestLines.join("\n"));
 
   form.flatten();
