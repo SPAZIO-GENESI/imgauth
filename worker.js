@@ -16,13 +16,15 @@ const MONTHS_IT = [
   "luglio", "agosto", "settembre", "ottobre", "novembre", "dicembre",
 ];
 
+const ALLOWED_ORIGIN = "https://imgauthweb.spaziogenesi.org";
+
 // ── Helpers CORS ────────────────────────────────────────────────────────────
 
 function corsHeaders() {
   return {
-    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Origin": ALLOWED_ORIGIN,
     "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
-    "Access-Control-Allow-Headers": "*",
+    "Access-Control-Allow-Headers": "Content-Type",
     "Access-Control-Max-Age": "86400",
   };
 }
@@ -62,7 +64,7 @@ export default {
 
     if (method === "GET"  && path === "/ping")        return handlePing(request);
     if (method === "POST" && path === "/api/hash")     return handleHash(request, env);
-    if (method === "POST" && path === "/api/verify")   return handleVerify(request);
+    if (method === "POST" && path === "/api/verify")   return handleVerify(request, env);
     if (method === "POST" && path === "/api/cert-pdf") return handlePdf(request, env);
 
     return jsonResponse({ error: "Endpoint non trovato", path }, 404);
@@ -126,25 +128,33 @@ async function handleHash(request, env) {
 
 // ── /api/verify ──────────────────────────────────────────────────────────────
 
-async function handleVerify(request) {
+async function handleVerify(request, env) {
   try {
-    const form    = await request.formData();
-    const file    = form.get("image");
-    const claimed = form.get("hash");
+    const form        = await request.formData();
+    const file        = form.get("image");
+    const claimed     = form.get("hash");
+    const attestazione = form.get("attestazione");
+    const hmacClaimed  = form.get("hmac");
 
     if (!file || !claimed) {
       return jsonResponse({ error: "Richiesti 'image' e 'hash'." }, 400);
     }
 
-    const raw    = await file.arrayBuffer();
+    const raw     = await file.arrayBuffer();
     const hashBuf = await crypto.subtle.digest("SHA-256", raw);
     const digest  = bufToHex(hashBuf);
     const normalized = String(claimed).trim().toLowerCase();
+
+    let hmac_valido = null;
+    if (attestazione && hmacClaimed && env?.HMAC_SECRET) {
+      hmac_valido = await verifyHmac(env.HMAC_SECRET, String(attestazione).trim(), String(hmacClaimed).trim());
+    }
 
     return jsonResponse({
       hash_dichiarato: normalized,
       hash_calcolato:  digest,
       coincide:        digest === normalized,
+      hmac_valido,
     });
   } catch (e) {
     return jsonResponse({ error: `Errore interno: ${e.message}` }, 500);
@@ -199,9 +209,11 @@ async function handlePdf(request, env) {
     let finalBytes = pdfBytes;
 
     if (env?.SIGNER_URL) {
+      const signHeaders = { "Content-Type": "application/pdf" };
+      if (env?.SIGN_SECRET) signHeaders["X-Sign-Secret"] = env.SIGN_SECRET;
       const signRes = await fetch(env.SIGNER_URL, {
         method: "POST",
-        headers: { "Content-Type": "application/pdf" },
+        headers: signHeaders,
         body: pdfBytes,
       });
       if (!signRes.ok) {
@@ -258,14 +270,24 @@ function humanTs(d) {
 // ── Utility: HMAC-SHA256 con Web Crypto ───────────────────────────────────────
 
 async function signHmac(secret, message) {
-  const enc     = new TextEncoder();
-  const keyMat  = await crypto.subtle.importKey(
+  const enc    = new TextEncoder();
+  const keyMat = await crypto.subtle.importKey(
     "raw", enc.encode(secret),
     { name: "HMAC", hash: "SHA-256" },
     false, ["sign"]
   );
-  const sigBuf  = await crypto.subtle.sign("HMAC", keyMat, enc.encode(message));
-  // base64
+  const sigBuf = await crypto.subtle.sign("HMAC", keyMat, enc.encode(message));
   return btoa(String.fromCharCode(...new Uint8Array(sigBuf)));
+}
+
+async function verifyHmac(secret, message, sigBase64) {
+  const enc    = new TextEncoder();
+  const keyMat = await crypto.subtle.importKey(
+    "raw", enc.encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false, ["verify"]
+  );
+  const sigBytes = Uint8Array.from(atob(sigBase64), c => c.charCodeAt(0));
+  return crypto.subtle.verify("HMAC", keyMat, sigBytes, enc.encode(message));
 }
 
