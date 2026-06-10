@@ -3,4 +3,4 @@ sistema di notarizzazione opere digitali
 
 su cloudflare
 
-uso tramite https://imgauthweb.spaziogenesi.org/ (github pages)
+uso tramite https://attestazione.spaziogenesi.org/ (github pages)

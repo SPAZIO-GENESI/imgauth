@@ -22,7 +22,7 @@ const MONTHS_IT = [
   "luglio", "agosto", "settembre", "ottobre", "novembre", "dicembre",
 ];
 
-const ALLOWED_ORIGIN = "https://imgauthweb.spaziogenesi.org";
+const ALLOWED_ORIGIN = "https://attestazione.spaziogenesi.org";
 
 // ── Helpers CORS ────────────────────────────────────────────────────────────
 
@@ -211,7 +211,7 @@ async function fillCertificatePdf(d) {
   // Copre il QR statico del template (Im0: x=438.1 y=673.7 79.4×79.4 pt)
   // e disegna il nuovo QR come rettangoli vettoriali con pdf-lib.
   const page = doc.getPages()[0];
-  const verifyUrl = `https://imgauthweb.spaziogenesi.org?hash=${d.sha256 ?? ""}`;
+  const verifyUrl = `https://attestazione.spaziogenesi.org?hash=${d.sha256 ?? ""}`;
   const QR_X = 438.1, QR_Y = 666.0, QR_SIZE = 100;
 
   const qr = encodeQR(verifyUrl, { ecc: "L" });
@@ -258,7 +258,7 @@ async function fillCertificatePdf(d) {
   // URL nel footer: pagina di verifica generica (corta, centrata). L'hash specifico
   // viaggia nel QR (verifyUrl, sopra) e nel campo SHA-256: nessuno digita a mano un
   // hash di 64 caratteri.
-  drawCentered("https://imgauthweb.spaziogenesi.org", 324.358, 7, oro);
+  drawCentered("https://attestazione.spaziogenesi.org", 324.358, 7, oro);
 
   const bytes = await doc.save();
   return new Uint8Array(bytes);
