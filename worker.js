@@ -225,8 +225,17 @@ async function fillCertificatePdf(d) {
     }
   }
 
-  // ── Correzione URL nel footer con hash pre-compilato ────────────────────────
+  // ── Correzione testi nel footer ─────────────────────────────────────────────
   const font = await doc.embedFont(StandardFonts.Helvetica);
+
+  // Indirizzo (y=302.9): vecchio "Centro Commerciale L'Aquilone" → corretto
+  page.drawRectangle({ x: 90, y: 296, width: 480, height: 13, color: rgb(1, 1, 1) });
+  page.drawText(
+    "Spazio Genesi ETS · Galleria Commerciale Via Roma, 215, primo piano · L'Aquila (AQ) · Documento generato automaticamente — non richiede firma manuale.",
+    { x: 97.3, y: 302.9, size: 6, font, color: rgb(0, 0, 0) }
+  );
+
+  // URL di verifica (y=324.4): URL completo con hash
   page.drawRectangle({ x: 128, y: 316, width: 360, height: 14, color: rgb(1, 1, 1) });
   page.drawText(verifyUrl, { x: 133, y: 322.0, size: 6, font, color: rgb(0, 0, 0) });
 
