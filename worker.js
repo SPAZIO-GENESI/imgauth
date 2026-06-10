@@ -233,19 +233,32 @@ async function fillCertificatePdf(d) {
     }
   }
 
-  // ── Correzione testi nel footer ─────────────────────────────────────────────
-  const font = await doc.embedFont(StandardFonts.Helvetica);
+  // ── Footer: indirizzo + URL di verifica ─────────────────────────────────────
+  // I testi ERRATI ereditati dal template originale (vecchio indirizzo "Centro
+  // Commerciale L'Aquilone" e URL "…workers.dev") sono stati rimossi UNA VOLTA dal
+  // content stream del template con scripts/patch-template.mjs. Qui ridisegniamo i
+  // testi corretti nelle stesse coordinate/colori/corpo del template (Times 7pt).
+  // Niente rettangoli di copertura: è testo normale, selezionabile e copia-incollabile.
+  const font   = await doc.embedFont(StandardFonts.TimesRoman);
+  const grigio = rgb(0.478, 0.439, 0.376); // colore testo grigio del footer template
+  const oro    = rgb(0.545, 0.412, 0.078); // colore "oro" dei link/accent del template
+  const pageW  = page.getWidth();          // 595.276 pt (A4)
 
-  // Indirizzo (y=302.9): vecchio "Centro Commerciale L'Aquilone" → corretto
-  page.drawRectangle({ x: 90, y: 296, width: 480, height: 13, color: rgb(1, 1, 1), borderWidth: 0 });
-  page.drawText(
-    "Spazio Genesi ETS · Galleria Commerciale Via Roma, 215, primo piano · L'Aquila (AQ) · Documento generato automaticamente — non richiede firma manuale.",
-    { x: 97.3, y: 302.9, size: 6, font, color: rgb(0, 0, 0) }
+  // Helper: disegna testo centrato orizzontalmente sulla pagina
+  const drawCentered = (text, y, size, color) => {
+    const w = font.widthOfTextAtSize(text, size);
+    page.drawText(text, { x: (pageW - w) / 2, y, size, font, color });
+  };
+
+  drawCentered(
+    "Spazio Genesi ETS – Galleria Commerciale Via Roma, 215, primo piano, L'Aquila (AQ) – Documento generato automaticamente — non richiede firma manuale.",
+    302.854, 7, grigio
   );
 
-  // URL di verifica (y=324.4): URL completo con hash
-  page.drawRectangle({ x: 128, y: 316, width: 360, height: 14, color: rgb(1, 1, 1), borderWidth: 0 });
-  page.drawText(verifyUrl, { x: 133, y: 322.0, size: 6, font, color: rgb(0, 0, 0) });
+  // URL nel footer: pagina di verifica generica (corta, centrata). L'hash specifico
+  // viaggia nel QR (verifyUrl, sopra) e nel campo SHA-256: nessuno digita a mano un
+  // hash di 64 caratteri.
+  drawCentered("https://imgauthweb.spaziogenesi.org", 324.358, 7, oro);
 
   const bytes = await doc.save();
   return new Uint8Array(bytes);
