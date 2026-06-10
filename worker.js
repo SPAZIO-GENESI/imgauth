@@ -8,7 +8,8 @@
  *   GET  /ping          → health check
  */
 
-import { PDFDocument } from "pdf-lib";
+import { PDFDocument, rgb, StandardFonts } from "pdf-lib";
+import { encode as encodeQR } from "uqr";
 import certTemplatePdf from "./certificato_opera_pdf_mod.pdf";
 
 const MONTHS_IT = [
@@ -197,6 +198,39 @@ async function fillCertificatePdf(d) {
   attestField.setText(attestLines.join("\n"));
 
   form.flatten();
+
+  // ── QR code dinamico ────────────────────────────────────────────────────────
+  // Copre il QR statico del template (Im0: x=438.1 y=673.7 79.4×79.4 pt)
+  // e disegna il nuovo QR come rettangoli vettoriali con pdf-lib.
+  const page = doc.getPages()[0];
+  const verifyUrl = `https://imgauthweb.spaziogenesi.org?hash=${d.sha256 ?? ""}`;
+  const QR_X = 438.1, QR_Y = 673.7, QR_SIZE = 79.4;
+
+  const qr = encodeQR(verifyUrl);
+  const mod = QR_SIZE / qr.size;
+
+  page.drawRectangle({ x: QR_X, y: QR_Y, width: QR_SIZE, height: QR_SIZE, color: rgb(1, 1, 1) });
+  for (let row = 0; row < qr.size; row++) {
+    for (let col = 0; col < qr.size; col++) {
+      if (qr.data[row * qr.size + col]) {
+        page.drawRectangle({
+          x: QR_X + col * mod,
+          y: QR_Y + (qr.size - 1 - row) * mod,
+          width: mod,
+          height: mod,
+          color: rgb(0, 0, 0),
+        });
+      }
+    }
+  }
+
+  // ── Correzione URL nel footer (era spazio-genesi.workers.dev, ora authweb) ──
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  page.drawRectangle({ x: 215, y: 320, width: 230, height: 11, color: rgb(1, 1, 1) });
+  page.drawText("https://imgauthweb.spaziogenesi.org", {
+    x: 219.1, y: 324.4, size: 7, font, color: rgb(0, 0, 0),
+  });
+
   const bytes = await doc.save();
   return new Uint8Array(bytes);
 }

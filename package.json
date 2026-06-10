@@ -20,6 +20,7 @@
   },
   "homepage": "https://github.com/SPAZIO-GENESI/imgauth#readme",
   "dependencies": {
-    "pdf-lib": "^1.17.1"
+    "pdf-lib": "^1.17.1",
+    "uqr": "^0.1.3"
   }
 }
