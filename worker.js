@@ -87,6 +87,27 @@ async function isRateLimited(limiter, key) {
   }
 }
 
+// ── Turnstile (anti-bot) ─────────────────────────────────────────────────────
+// Verifica server-side del token prodotto dal widget in authweb. Attivo solo se
+// TURNSTILE_SECRET è configurato; in caso di errore di rete fa fail-closed
+// (false) perché è una barriera anti-bot: meglio negare che lasciar passare.
+async function verifyTurnstile(secret, token, ip) {
+  try {
+    const form = new FormData();
+    form.append("secret", secret);
+    form.append("response", token);
+    if (ip) form.append("remoteip", ip);
+    const r = await fetch("https://challenges.cloudflare.com/turnstile/v0/siteverify", {
+      method: "POST",
+      body: form,
+    });
+    const data = await r.json();
+    return data.success === true;
+  } catch {
+    return false;
+  }
+}
+
 // ── Entry point ──────────────────────────────────────────────────────────────
 
 export default {
@@ -343,6 +364,21 @@ async function handlePdf(request, env) {
     const tokenOk = await verifyHmac(env.HMAC_SECRET, attest, hmac);
     if (!tokenOk) {
       return jsonResponse({ error: "Firma dell'attestazione non valida: certificato non emettibile." }, 403);
+    }
+
+    // ── Anti-bot Turnstile ─────────────────────────────────────────────────────
+    // Solo l'emissione del certificato (azione costosa) richiede la challenge:
+    // il flusso di hashing resta senza attriti. Attivo se TURNSTILE_SECRET è impostato.
+    if (env?.TURNSTILE_SECRET) {
+      const tsToken = String(d.turnstile_token ?? "");
+      if (!tsToken) {
+        return jsonResponse({ error: "Verifica anti-bot mancante." }, 400);
+      }
+      const ip = request.headers.get("CF-Connecting-IP") || undefined;
+      const human = await verifyTurnstile(env.TURNSTILE_SECRET, tsToken, ip);
+      if (!human) {
+        return jsonResponse({ error: "Verifica anti-bot non superata. Riprova." }, 403);
+      }
     }
 
     const pdfBytes = await fillCertificatePdf(d);
