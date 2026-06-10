@@ -1,0 +1,25 @@
+{
+  "name": "imgauth",
+  "version": "1.0.0",
+  "description": "AUTENTICATORE DI ORIGINALITA FOTOGRAFICA",
+  "main": "worker.js",
+  "scripts": {
+    "deploy:preview": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/deploy-preview.ps1 -PreviewAlias test-pdf-certificato-imgauth",
+    "deploy:preview:dry": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/deploy-preview.ps1 -PreviewAlias test-pdf-certificato-imgauth -DryRun",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SPAZIO-GENESI/imgauth.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/SPAZIO-GENESI/imgauth/issues"
+  },
+  "homepage": "https://github.com/SPAZIO-GENESI/imgauth#readme",
+  "dependencies": {
+    "pdf-lib": "^1.17.1"
+  }
+}

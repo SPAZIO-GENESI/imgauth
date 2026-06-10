@@ -1,0 +1,7 @@
+{
+    "ai.useOllamaForLocalModels": true,
+    "ai.ollamaModel": "qwen2.5-coder:14b",
+    "ai.model": "ollama",
+    "ai.temperature": 0.2,
+    "ai.maxTokens": 4096
+  }
