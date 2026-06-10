@@ -210,7 +210,7 @@ async function fillCertificatePdf(d) {
   const mod = QR_SIZE / qr.size;
 
   // Quiet zone + copertura QR statico
-  page.drawRectangle({ x: QR_X - 3, y: QR_Y - 3, width: QR_SIZE + 6, height: QR_SIZE + 6, color: rgb(1, 1, 1) });
+  page.drawRectangle({ x: QR_X - 3, y: QR_Y - 3, width: QR_SIZE + 6, height: QR_SIZE + 6, color: rgb(1, 1, 1), borderWidth: 0 });
   for (let row = 0; row < qr.size; row++) {
     for (let col = 0; col < qr.size; col++) {
       if (qr.data[row][col]) {
@@ -229,14 +229,14 @@ async function fillCertificatePdf(d) {
   const font = await doc.embedFont(StandardFonts.Helvetica);
 
   // Indirizzo (y=302.9): vecchio "Centro Commerciale L'Aquilone" → corretto
-  page.drawRectangle({ x: 90, y: 296, width: 480, height: 13, color: rgb(1, 1, 1) });
+  page.drawRectangle({ x: 90, y: 296, width: 480, height: 13, color: rgb(1, 1, 1), borderWidth: 0 });
   page.drawText(
     "Spazio Genesi ETS · Galleria Commerciale Via Roma, 215, primo piano · L'Aquila (AQ) · Documento generato automaticamente — non richiede firma manuale.",
     { x: 97.3, y: 302.9, size: 6, font, color: rgb(0, 0, 0) }
   );
 
   // URL di verifica (y=324.4): URL completo con hash
-  page.drawRectangle({ x: 128, y: 316, width: 360, height: 14, color: rgb(1, 1, 1) });
+  page.drawRectangle({ x: 128, y: 316, width: 360, height: 14, color: rgb(1, 1, 1), borderWidth: 0 });
   page.drawText(verifyUrl, { x: 133, y: 322.0, size: 6, font, color: rgb(0, 0, 0) });
 
   const bytes = await doc.save();
