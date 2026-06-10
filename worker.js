@@ -196,16 +196,31 @@ async function handlePdf(request, env) {
     const d = await request.json();
     const pdfBytes = await fillCertificatePdf(d);
 
+    let finalBytes = pdfBytes;
+
+    if (env?.SIGNER_URL) {
+      const signRes = await fetch(env.SIGNER_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/pdf" },
+        body: pdfBytes,
+      });
+      if (!signRes.ok) {
+        const msg = await signRes.text().catch(() => signRes.status);
+        return jsonResponse({ error: `Errore firma crittografica: ${msg}` }, 502);
+      }
+      finalBytes = new Uint8Array(await signRes.arrayBuffer());
+    }
+
     const stamp = certFilenameStamp();
     const key = `pdf/certificato_${stamp}.pdf`;
 
     if (env?.PDF_ARCHIVE) {
-      await env.PDF_ARCHIVE.put(key, pdfBytes, {
+      await env.PDF_ARCHIVE.put(key, finalBytes, {
         httpMetadata: { contentType: "application/pdf" },
       });
     }
 
-    return pdfResponse(pdfBytes);
+    return pdfResponse(finalBytes);
   } catch (e) {
     return jsonResponse({ error: `Errore interno PDF: ${e.message}` }, 500);
   }

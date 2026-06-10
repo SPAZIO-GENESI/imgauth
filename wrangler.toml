@@ -2,6 +2,9 @@ name = "imgauth"
 main = "worker.js"
 compatibility_date = "2024-09-23"
 
+[vars]
+SIGNER_URL = "https://sgart.azurewebsites.net/sign"
+
 # Template PDF come ArrayBuffer (import in worker.js)
 [[rules]]
 type = "Data"
