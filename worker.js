@@ -88,24 +88,20 @@ async function isRateLimited(limiter, key) {
 }
 
 // ── Turnstile (anti-bot) ─────────────────────────────────────────────────────
-// Verifica server-side del token prodotto dal widget in authweb. Attivo solo se
-// TURNSTILE_SECRET è configurato; in caso di errore di rete fa fail-closed
-// (false) perché è una barriera anti-bot: meglio negare che lasciar passare.
+// Verifica server-side del token prodotto dal widget in authweb. Ritorna l'esito
+// di siteverify (true/false). RILANCIA in caso di errore di rete: il chiamante
+// decide la politica (su /api/hash, endpoint primario, si fa fail-open).
 async function verifyTurnstile(secret, token, ip) {
-  try {
-    const form = new FormData();
-    form.append("secret", secret);
-    form.append("response", token);
-    if (ip) form.append("remoteip", ip);
-    const r = await fetch("https://challenges.cloudflare.com/turnstile/v0/siteverify", {
-      method: "POST",
-      body: form,
-    });
-    const data = await r.json();
-    return data.success === true;
-  } catch {
-    return false;
-  }
+  const form = new FormData();
+  form.append("secret", secret);
+  form.append("response", token);
+  if (ip) form.append("remoteip", ip);
+  const r = await fetch("https://challenges.cloudflare.com/turnstile/v0/siteverify", {
+    method: "POST",
+    body: form,
+  });
+  const data = await r.json();
+  return data.success === true;
 }
 
 // ── Entry point ──────────────────────────────────────────────────────────────
@@ -154,6 +150,27 @@ async function handleHash(request, env) {
     const mime  = data.type  ?? "application/octet-stream";
 
     if (!b64) return jsonResponse({ error: "Campo 'image' mancante." }, 400);
+
+    // ── Anti-bot Turnstile ─────────────────────────────────────────────────────
+    // La challenge è qui, all'emissione dell'attestazione: nessun token HMAC viene
+    // rilasciato (né per il .txt né per il PDF) senza un umano verificato.
+    // Fail-open se siteverify è irraggiungibile: è l'endpoint primario e un
+    // disservizio Turnstile non deve impedire il calcolo dell'hash.
+    if (env?.TURNSTILE_SECRET) {
+      const tsToken = String(data.turnstile_token ?? "");
+      if (!tsToken) {
+        return jsonResponse({ error: "Verifica anti-bot mancante." }, 400);
+      }
+      let human;
+      try {
+        human = await verifyTurnstile(env.TURNSTILE_SECRET, tsToken, request.headers.get("CF-Connecting-IP") || undefined);
+      } catch {
+        human = true; // siteverify irraggiungibile → non bloccare il servizio primario
+      }
+      if (!human) {
+        return jsonResponse({ error: "Verifica anti-bot non superata. Riprova." }, 403);
+      }
+    }
 
     // Tetto di dimensione (difesa DoS/memoria): scarta payload oltre il limite
     // prima ancora di decodificarlo. base64 ≈ 4/3 dei byte grezzi.
@@ -365,21 +382,9 @@ async function handlePdf(request, env) {
     if (!tokenOk) {
       return jsonResponse({ error: "Firma dell'attestazione non valida: certificato non emettibile." }, 403);
     }
-
-    // ── Anti-bot Turnstile ─────────────────────────────────────────────────────
-    // Solo l'emissione del certificato (azione costosa) richiede la challenge:
-    // il flusso di hashing resta senza attriti. Attivo se TURNSTILE_SECRET è impostato.
-    if (env?.TURNSTILE_SECRET) {
-      const tsToken = String(d.turnstile_token ?? "");
-      if (!tsToken) {
-        return jsonResponse({ error: "Verifica anti-bot mancante." }, 400);
-      }
-      const ip = request.headers.get("CF-Connecting-IP") || undefined;
-      const human = await verifyTurnstile(env.TURNSTILE_SECRET, tsToken, ip);
-      if (!human) {
-        return jsonResponse({ error: "Verifica anti-bot non superata. Riprova." }, 403);
-      }
-    }
+    // Anti-bot: la challenge Turnstile è a monte, su /api/hash. Qui il token HMAC
+    // garantisce già che l'attestazione provenga da una sessione umana verificata;
+    // il costo è ulteriormente limitato dal rate-limit per-IP (RL_CERT).
 
     const pdfBytes = await fillCertificatePdf(d);
 
