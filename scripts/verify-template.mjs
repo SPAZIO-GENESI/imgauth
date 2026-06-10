@@ -47,8 +47,7 @@ const drawCentered = (text, y, size, color) => {
   console.log(`  centrato "${text.slice(0, 30)}…" @${size}pt: x=${((pageW - w) / 2).toFixed(1)} larghezza=${w.toFixed(1)} (fine x=${((pageW + w) / 2).toFixed(1)})`);
 };
 drawCentered(addr, 302.854, 7, rgb(0.478, 0.439, 0.376));
-drawCentered("https://attestazione.spaziogenesi.org", 324.358, 7, rgb(0.545, 0.412, 0.078));
-void verifyUrl;
+drawCentered(verifyUrl, 324.358, 7, rgb(0.545, 0.412, 0.078));
 const out = await doc.save();
 writeFileSync(new URL("./footer-sample.pdf", import.meta.url), out);
 

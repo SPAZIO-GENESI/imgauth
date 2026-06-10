@@ -342,10 +342,10 @@ async function fillCertificatePdf(d) {
     302.854, 7, grigio
   );
 
-  // URL nel footer: pagina di verifica generica (corta, centrata). L'hash specifico
-  // viaggia nel QR (verifyUrl, sopra) e nel campo SHA-256: nessuno digita a mano un
-  // hash di 64 caratteri.
-  drawCentered("https://attestazione.spaziogenesi.org", 324.358, 7, oro);
+  // URL nel footer: la pagina di verifica con l'hash già precompilato (stessa
+  // destinazione del QR). Chi copia o clicca il link atterra sulla verifica con
+  // l'impronta inserita, senza doverla digitare a mano.
+  drawCentered(verifyUrl, 324.358, 7, oro);
 
   const bytes = await doc.save();
   return new Uint8Array(bytes);
