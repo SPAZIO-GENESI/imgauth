@@ -24,6 +24,13 @@ const MONTHS_IT = [
 
 const ALLOWED_ORIGIN = "https://attestazione.spaziogenesi.org";
 
+// Limite dimensione opera: coerente con i 100 MB dichiarati dall'interfaccia.
+const MAX_BYTES = 100 * 1024 * 1024;
+
+// Formati attesi per i campi vincolati crittograficamente (vedi handlePdf).
+const HEX64  = /^[0-9a-f]{64}$/i;
+const ISO_TS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
+
 // ── Helpers CORS ────────────────────────────────────────────────────────────
 
 function corsHeaders() {
@@ -94,8 +101,17 @@ async function handleHash(request, env) {
 
     if (!b64) return jsonResponse({ error: "Campo 'image' mancante." }, 400);
 
+    // Tetto di dimensione (difesa DoS/memoria): scarta payload oltre il limite
+    // prima ancora di decodificarlo. base64 ≈ 4/3 dei byte grezzi.
+    if (typeof b64 !== "string" || b64.length > Math.ceil(MAX_BYTES / 3) * 4 + 64) {
+      return jsonResponse({ error: "File troppo grande (max 100 MB)." }, 413);
+    }
+
     // Decodifica base64 → ArrayBuffer
     const raw = base64ToBytes(b64);
+    if (raw.byteLength > MAX_BYTES) {
+      return jsonResponse({ error: "File troppo grande (max 100 MB)." }, 413);
+    }
 
     // SHA-256
     const hashBuf = await crypto.subtle.digest("SHA-256", raw);
@@ -127,8 +143,8 @@ async function handleHash(request, env) {
       emesso_da:           issuer,
       hmac:                hmacSig,
     });
-  } catch (e) {
-    return jsonResponse({ error: `Errore interno: ${e.message}` }, 500);
+  } catch {
+    return jsonResponse({ error: "Errore interno del server." }, 500);
   }
 }
 
@@ -162,8 +178,8 @@ async function handleVerify(request, env) {
       coincide:        digest === normalized,
       hmac_valido,
     });
-  } catch (e) {
-    return jsonResponse({ error: `Errore interno: ${e.message}` }, 500);
+  } catch {
+    return jsonResponse({ error: "Errore interno del server." }, 500);
   }
 }
 
@@ -267,6 +283,35 @@ async function fillCertificatePdf(d) {
 async function handlePdf(request, env) {
   try {
     const d = await request.json();
+
+    // ── Autenticità del contenuto ────────────────────────────────────────────
+    // Il certificato può essere emesso SOLO a partire da un'attestazione
+    // realmente prodotta da /api/hash: verifichiamo il token HMAC che lega
+    // hash + timestamp al segreto del server. Senza questo controllo chiunque
+    // potrebbe far firmare crittograficamente contenuti arbitrari (hash falsi,
+    // date retrodatate), svuotando di valore probatorio l'intero servizio.
+    if (!env?.HMAC_SECRET) {
+      return jsonResponse({ error: "Servizio non configurato per l'emissione di certificati." }, 503);
+    }
+    const sha256 = String(d.sha256 ?? "");
+    const tsIso  = String(d.timestamp_iso ?? "");
+    const attest = String(d.attestazione ?? "");
+    const hmac   = String(d.hmac ?? "");
+
+    if (!HEX64.test(sha256) || !ISO_TS.test(tsIso) || !attest || !hmac) {
+      return jsonResponse({ error: "Attestazione incompleta o malformata." }, 400);
+    }
+    // L'attestazione firmata deve corrispondere ESATTAMENTE ai campi hash e
+    // timestamp che finiranno stampati sul certificato: così il token non può
+    // essere riusato con un hash o una data diversi da quelli che ha autenticato.
+    if (attest !== `SHA-256:${sha256}@${tsIso}`) {
+      return jsonResponse({ error: "Attestazione non coerente con hash e timestamp." }, 400);
+    }
+    const tokenOk = await verifyHmac(env.HMAC_SECRET, attest, hmac);
+    if (!tokenOk) {
+      return jsonResponse({ error: "Firma dell'attestazione non valida: certificato non emettibile." }, 403);
+    }
+
     const pdfBytes = await fillCertificatePdf(d);
 
     let finalBytes = pdfBytes;
@@ -296,8 +341,8 @@ async function handlePdf(request, env) {
     }
 
     return pdfResponse(finalBytes);
-  } catch (e) {
-    return jsonResponse({ error: `Errore interno PDF: ${e.message}` }, 500);
+  } catch {
+    return jsonResponse({ error: "Errore interno durante la generazione del certificato." }, 500);
   }
 }
 
