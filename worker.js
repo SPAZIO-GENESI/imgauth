@@ -104,6 +104,46 @@ async function verifyTurnstile(secret, token, ip) {
   return data.success === true;
 }
 
+// ── Metadati dichiarati dall'autore ──────────────────────────────────────────
+// Campi descrittivi FACOLTATIVI (titolo, autore, anno, note). Sono auto-
+// dichiarazioni: non provano nulla di per sé, ma vengono vincolati al token
+// HMAC, così non possono essere alterati dopo l'emissione dell'attestazione.
+const META_FIELDS = [
+  ["titolo", 150],
+  ["autore", 100],
+  ["anno",    50],
+  ["note",   300],
+];
+
+// Normalizza un valore dichiarato: collassa qualsiasi whitespace (newline
+// compresi) in spazi singoli, scarta i caratteri fuori da WinAnsi (i font
+// standard del PDF non li codificano: meglio perderli QUI, prima della firma,
+// che firmare un testo non stampabile), trim e tetto di lunghezza.
+// La forma canonica prodotta qui è ciò che viene firmato, stampato e verificato.
+function cleanMeta(v, max) {
+  return String(v ?? "")
+    .replace(/\s+/g, " ")
+    .replace(/[^\x20-\x7E\xA0-\xFF€‚ƒ„…†‡ˆ‰Š‹ŒŽ‘’“”•–—˜™š›œžŸ]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, max);
+}
+
+function extractMeta(src) {
+  const meta = {};
+  for (const [k, max] of META_FIELDS) meta[k] = cleanMeta(src?.[k], max);
+  return meta;
+}
+
+// Messaggio firmato dal token HMAC. SENZA metadati coincide con la sola
+// stringa di attestazione → i certificati già emessi (e quelli senza dati
+// dichiarati) restano verificabili con la logica precedente. CON metadati
+// li accoda in forma canonica, vincolandoli alla firma.
+function hmacMessage(attest, meta) {
+  if (!META_FIELDS.some(([k]) => meta[k])) return attest;
+  return attest + "\n" + META_FIELDS.map(([k]) => `${k}:${meta[k]}`).join("\n");
+}
+
 // ── Entry point ──────────────────────────────────────────────────────────────
 
 export default {
@@ -197,16 +237,22 @@ async function handleHash(request, env) {
     const attestazione = `SHA-256:${digest}@${tsIso}`;
     const issuer       = "Spazio Genesi ETS — Attestazione Opere";
 
+    // Metadati dichiarati (facoltativi): normalizzati qui e VINCOLATI al token
+    // HMAC, così non sono alterabili dopo l'emissione. Restituiti nella risposta
+    // nella forma canonica firmata (il client li round-trippa a /api/cert-pdf).
+    const meta = extractMeta(data);
+
     // HMAC opzionale
     let hmacSig = null;
     if (env?.HMAC_SECRET) {
-      hmacSig = await signHmac(env.HMAC_SECRET, attestazione);
+      hmacSig = await signHmac(env.HMAC_SECRET, hmacMessage(attestazione, meta));
     }
 
     return jsonResponse({
       opera:               name,
       dimensione_bytes:    size,
       tipo_mime:           mime,
+      ...meta,
       sha256:              digest,
       timestamp_iso:       tsIso,
       timestamp_leggibile: tsHuman,
@@ -240,7 +286,17 @@ async function handleVerify(request, env) {
 
     let hmac_valido = null;
     if (attestazione && hmacClaimed && env?.HMAC_SECRET) {
-      hmac_valido = await verifyHmac(env.HMAC_SECRET, String(attestazione).trim(), String(hmacClaimed).trim());
+      // Se il certificato riportava dati dichiarati (titolo, autore, …) la firma
+      // li copre: vanno forniti identici per la verifica. Senza, il messaggio
+      // coincide con la sola attestazione (compatibile coi certificati storici).
+      const meta = extractMeta({
+        titolo: form.get("titolo"),
+        autore: form.get("autore"),
+        anno:   form.get("anno"),
+        note:   form.get("note"),
+      });
+      const message = hmacMessage(String(attestazione).trim(), meta);
+      hmac_valido = await verifyHmac(env.HMAC_SECRET, message, String(hmacClaimed).trim());
     }
 
     return jsonResponse({
@@ -260,7 +316,7 @@ function certFilenameStamp() {
   return new Date().toISOString().replace(/[:.]/g, "-");
 }
 
-async function fillCertificatePdf(d) {
+async function fillCertificatePdf(d, meta) {
   const doc = await PDFDocument.load(certTemplatePdf);
   const form = doc.getForm();
 
@@ -271,26 +327,13 @@ async function fillCertificatePdf(d) {
   form.getTextField("TIMEISO").setText(String(d.timestamp_iso ?? ""));
   form.getTextField("TIMELEG").setText(String(d.timestamp_leggibile ?? ""));
 
+  // Il box ATTESTAZIONE del template è alto ~32pt (≈3 righe a font 9): contiene
+  // SOLO etichetta + stringa. Le righe che in passato vi venivano accodate
+  // (firma HMAC, emesso da, versione) risultavano TAGLIATE e invisibili: oggi
+  // vivono nel blocco "Dettagli tecnici" disegnato a runtime in fondo pagina.
   const attestField = form.getTextField("ATTESTAZIONE");
   attestField.enableMultiline();
-
-  const attestLines = [];
-  attestLines.push("Stringa di attestazione:");
-  attestLines.push(String(d.attestazione ?? ""));
-  if (d.hmac) {
-    attestLines.push("");
-    attestLines.push("Firma HMAC (server):");
-    attestLines.push(String(d.hmac));
-  }
-  if (d.emesso_da) {
-    attestLines.push("");
-    attestLines.push("Emesso da:");
-    attestLines.push(String(d.emesso_da));
-  }
-  attestLines.push("");
-  attestLines.push("Versione motore:");
-  attestLines.push(`imgauth v${APP_VERSION}`);
-  attestField.setText(attestLines.join("\n"));
+  attestField.setText(`Stringa di attestazione:\n${String(d.attestazione ?? "")}`);
 
   form.flatten();
 
@@ -347,6 +390,51 @@ async function fillCertificatePdf(d) {
   // l'impronta inserita, senza doverla digitare a mano.
   drawCentered(verifyUrl, 324.358, 7, oro);
 
+  // ── Blocco "Dettagli tecnici" ───────────────────────────────────────────────
+  // Disegnato nello spazio libero sotto il footer (dal credito "tangram" in giù
+  // la pagina è vuota fino al bordo). Contiene gli eventuali dati dichiarati
+  // dall'autore, la firma HMAC e la versione del motore — tutte informazioni
+  // che il box ATTESTAZIONE (32pt) non può ospitare. A-capo a misura di parola
+  // sulla larghezza utile; le parole oltre-larghezza vengono spezzate.
+  const BLOCK_X = 56.4, BLOCK_W = 482.3;
+  let blockY = 252;
+  const drawWrapped = (text, size, color) => {
+    let line = "";
+    const flush = () => {
+      if (!line) return;
+      page.drawText(line, { x: BLOCK_X, y: blockY, size, font, color });
+      blockY -= size * 1.35;
+      line = "";
+    };
+    for (let word of text.split(" ")) {
+      while (font.widthOfTextAtSize(word, size) > BLOCK_W) {
+        flush();
+        let cut = word.length;
+        while (cut > 1 && font.widthOfTextAtSize(word.slice(0, cut), size) > BLOCK_W) cut--;
+        line = word.slice(0, cut); flush();
+        word = word.slice(cut);
+      }
+      const candidate = line ? `${line} ${word}` : word;
+      if (font.widthOfTextAtSize(candidate, size) > BLOCK_W) { flush(); line = word; }
+      else line = candidate;
+    }
+    flush();
+  };
+
+  drawWrapped("Dettagli tecnici dell'attestazione", 7.5, oro);
+  blockY -= 2;
+  const hasDeclared = meta && (meta.titolo || meta.autore || meta.anno || meta.note);
+  if (meta?.titolo) drawWrapped(`Titolo dell'opera (dichiarato): ${meta.titolo}`, 7, grigio);
+  if (meta?.autore) drawWrapped(`Autore (dichiarato): ${meta.autore}`, 7, grigio);
+  if (meta?.anno)   drawWrapped(`Anno/versione (dichiarato): ${meta.anno}`, 7, grigio);
+  if (meta?.note)   drawWrapped(`Note (dichiarate): ${meta.note}`, 7, grigio);
+  if (d.hmac)       drawWrapped(`Firma HMAC (server): ${String(d.hmac)}`, 7, grigio);
+  drawWrapped(`Emesso da: ${String(d.emesso_da ?? "Spazio Genesi ETS — Attestazione Opere")} — Motore: imgauth v${APP_VERSION}`, 7, grigio);
+  if (hasDeclared) {
+    blockY -= 2;
+    drawWrapped("I dati “dichiarati” sono forniti dall'autore al momento dell'attestazione e sono vincolati alla firma HMAC: non possono essere modificati dopo l'emissione. Non costituiscono prova di paternità dell'opera.", 6.5, grigio);
+  }
+
   const bytes = await doc.save();
   return new Uint8Array(bytes);
 }
@@ -378,7 +466,10 @@ async function handlePdf(request, env) {
     if (attest !== `SHA-256:${sha256}@${tsIso}`) {
       return jsonResponse({ error: "Attestazione non coerente con hash e timestamp." }, 400);
     }
-    const tokenOk = await verifyHmac(env.HMAC_SECRET, attest, hmac);
+    // I metadati dichiarati entrano nel messaggio firmato: un titolo o un autore
+    // diversi da quelli autenticati da /api/hash invalidano la firma → 403.
+    const meta = extractMeta(d);
+    const tokenOk = await verifyHmac(env.HMAC_SECRET, hmacMessage(attest, meta), hmac);
     if (!tokenOk) {
       return jsonResponse({ error: "Firma dell'attestazione non valida: certificato non emettibile." }, 403);
     }
@@ -386,7 +477,7 @@ async function handlePdf(request, env) {
     // garantisce già che l'attestazione provenga da una sessione umana verificata;
     // il costo è ulteriormente limitato dal rate-limit per-IP (RL_CERT).
 
-    const pdfBytes = await fillCertificatePdf(d);
+    const pdfBytes = await fillCertificatePdf(d, meta);
 
     let finalBytes = pdfBytes;
 
