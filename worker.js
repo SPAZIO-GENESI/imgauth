@@ -380,9 +380,16 @@ async function fillCertificatePdf(d, meta) {
     page.drawText(text, { x: (pageW - w) / 2, y, size, font, color });
   };
 
+  // Dati dell'ente su due righe: C.F. e sede legale (Roma), poi sede operativa
+  // (L'Aquila). La riga inferiore scende a y=296.5 per non toccare il credito
+  // "Realizzato da tangram" del template (~y 285).
   drawCentered(
-    "Spazio Genesi ETS – Galleria Commerciale Via Roma, 215, primo piano, L'Aquila (AQ) – Documento generato automaticamente — non richiede firma manuale.",
-    302.854, 7, grigio
+    "Spazio Genesi ETS — Codice fiscale 96602450585 — Sede legale: Via Francesco Caracciolo 14, 00167 Roma (RM)",
+    306.5, 7, grigio
+  );
+  drawCentered(
+    "Sede operativa: Galleria Commerciale Via Roma 215, primo piano, L'Aquila (AQ) — Documento generato automaticamente, non richiede firma manuale.",
+    296.5, 7, grigio
   );
 
   // URL nel footer: la pagina di verifica con l'hash già precompilato (stessa
@@ -430,6 +437,7 @@ async function fillCertificatePdf(d, meta) {
   if (meta?.note)   drawWrapped(`Note (dichiarate): ${meta.note}`, 7, grigio);
   if (d.hmac)       drawWrapped(`Firma HMAC (server): ${String(d.hmac)}`, 7, grigio);
   drawWrapped(`Emesso da: ${String(d.emesso_da ?? "Spazio Genesi ETS — Attestazione Opere")} — Motore: imgauth v${APP_VERSION}`, 7, grigio);
+  drawWrapped("Sito dell'associazione: https://spaziogenesi.org", 7, oro);
   if (hasDeclared) {
     blockY -= 2;
     drawWrapped("I dati “dichiarati” sono forniti dall'autore al momento dell'attestazione e sono vincolati alla firma HMAC: non possono essere modificati dopo l'emissione. Non costituiscono prova di paternità dell'opera.", 6.5, grigio);

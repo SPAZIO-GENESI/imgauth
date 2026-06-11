@@ -26,13 +26,14 @@ for (const [label, hex, wantGone] of [
   console.log(`  ${ok ? "✓" : "✗ ATTESO " + (wantGone ? "rimosso" : "presente")} ${label}: ${present ? "presente" : "assente"}`);
 }
 
-// 3) Simula il footer del worker e misura larghezza indirizzo
+// 3) Simula il footer del worker e misura larghezza delle righe ente
 const font = await doc.embedFont(StandardFonts.TimesRoman);
-const addr = "Spazio Genesi ETS – Galleria Commerciale Via Roma, 215, primo piano, L'Aquila (AQ) – Documento generato automaticamente — non richiede firma manuale.";
-const w7 = font.widthOfTextAtSize(addr, 7);
-console.log(`\nLarghezza indirizzo @7pt: ${w7.toFixed(1)}pt  (da x=97.3 → fino a x=${(97.306 + w7).toFixed(1)}; margine destro pagina utile ≈ 561)`);
-const w65 = font.widthOfTextAtSize(addr, 6.5);
-console.log(`Larghezza indirizzo @6.5pt: ${w65.toFixed(1)}pt → fino a x=${(97.306 + w65).toFixed(1)}`);
+const rigaEnte = "Spazio Genesi ETS — Codice fiscale 96602450585 — Sede legale: Via Francesco Caracciolo 14, 00167 Roma (RM)";
+const addr = "Sede operativa: Galleria Commerciale Via Roma 215, primo piano, L'Aquila (AQ) — Documento generato automaticamente, non richiede firma manuale.";
+for (const [label, t] of [["riga ente/CF/sede legale", rigaEnte], ["riga sede operativa", addr]]) {
+  const w = font.widthOfTextAtSize(t, 7);
+  console.log(`\nLarghezza ${label} @7pt: ${w.toFixed(1)}pt (pagina utile ≈ 505pt: ${w < 505 ? "OK" : "TROPPO LARGA"})`);
+}
 
 // Disegna e salva un campione per ispezione testo
 const sampleHash = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
@@ -46,7 +47,8 @@ const drawCentered = (text, y, size, color) => {
   page.drawText(text, { x: (pageW - w) / 2, y, size, font, color });
   console.log(`  centrato "${text.slice(0, 30)}…" @${size}pt: x=${((pageW - w) / 2).toFixed(1)} larghezza=${w.toFixed(1)} (fine x=${((pageW + w) / 2).toFixed(1)})`);
 };
-drawCentered(addr, 302.854, 7, rgb(0.478, 0.439, 0.376));
+drawCentered(rigaEnte, 306.5, 7, rgb(0.478, 0.439, 0.376));
+drawCentered(addr, 296.5, 7, rgb(0.478, 0.439, 0.376));
 drawCentered(verifyUrl, 324.358, 7, rgb(0.545, 0.412, 0.078));
 const out = await doc.save();
 writeFileSync(new URL("./footer-sample.pdf", import.meta.url), out);
@@ -68,7 +70,7 @@ while (true) {
     return o;
   });
   const hay = txt + "\n" + plain;
-  if (hay.includes("Via Roma, 215")) found.newAddr = true;
+  if (hay.includes("Via Roma 215") && hay.includes("96602450585") && hay.includes("Caracciolo")) found.newAddr = true;
   if (hay.includes("attestazione.spaziogenesi.org")) found.newUrl = true;
   if (hay.includes("Aquilone")) found.oldAddr = true;
   if (hay.includes("workers.dev") || hay.includes("spazio-genesi.wo")) found.oldUrl = true;
