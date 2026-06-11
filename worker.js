@@ -163,12 +163,15 @@ export default {
       if (await isRateLimited(env.RL_CERT, ip)) return tooManyResponse();
     } else if (method === "POST" && (path === "/api/hash" || path === "/api/verify")) {
       if (await isRateLimited(env.RL_API, ip)) return tooManyResponse();
+    } else if (method === "GET" && path === "/api/ots") {
+      if (await isRateLimited(env.RL_API, ip)) return tooManyResponse();
     }
 
     if (method === "GET"  && path === "/ping")        return handlePing(request);
     if (method === "POST" && path === "/api/hash")     return handleHash(request, env);
     if (method === "POST" && path === "/api/verify")   return handleVerify(request, env);
     if (method === "POST" && path === "/api/cert-pdf") return handlePdf(request, env);
+    if (method === "GET"  && path === "/api/ots")      return handleOts(url, env);
 
     return jsonResponse({ error: "Endpoint non trovato", path }, 404);
   },
@@ -316,7 +319,7 @@ function certFilenameStamp() {
   return new Date().toISOString().replace(/[:.]/g, "-");
 }
 
-async function fillCertificatePdf(d, meta) {
+async function fillCertificatePdf(d, meta, otsUrl) {
   const doc = await PDFDocument.load(certTemplatePdf);
   const form = doc.getForm();
 
@@ -449,6 +452,9 @@ async function fillCertificatePdf(d, meta) {
   blockY -= 1;
   if (d.hmac) drawWrapped(`Firma HMAC (server): ${String(d.hmac)}`, 6.5, grigio);
   drawWrapped(`Emesso da: ${String(d.emesso_da ?? "Spazio Genesi ETS — Attestazione Opere")} — Motore: imgauth v${APP_VERSION} — File: ${String(d.opera ?? "")}`, 6.5, grigio);
+  if (otsUrl) {
+    drawWrapped(`Ancoraggio blockchain (OpenTimestamps, Bitcoin): prova scaricabile da ${otsUrl} — verifica su https://opentimestamps.org`, 6.5, grigio);
+  }
   drawWrapped("Sito dell'associazione: https://spaziogenesi.org", 6.5, oro);
 
   const bytes = await doc.save();
@@ -493,7 +499,12 @@ async function handlePdf(request, env) {
     // garantisce già che l'attestazione provenga da una sessione umana verificata;
     // il costo è ulteriormente limitato dal rate-limit per-IP (RL_CERT).
 
-    const pdfBytes = await fillCertificatePdf(d, meta);
+    // Ancoraggio blockchain PRIMA di costruire il PDF: così l'URL della prova
+    // viene stampato solo se la prova esiste davvero. Fail-open: senza calendar
+    // il certificato esce comunque, semplicemente senza la riga OpenTimestamps.
+    const otsUrl = await ensureOtsProof(sha256, env);
+
+    const pdfBytes = await fillCertificatePdf(d, meta, otsUrl);
 
     let finalBytes = pdfBytes;
 
@@ -578,5 +589,122 @@ async function verifyHmac(secret, message, sigBase64) {
   );
   const sigBytes = Uint8Array.from(atob(sigBase64), c => c.charCodeAt(0));
   return crypto.subtle.verify("HMAC", keyMat, sigBytes, enc.encode(message));
+}
+
+// ── OpenTimestamps ────────────────────────────────────────────────────────────
+// Prova di esistenza decentralizzata: l'hash dell'opera viene ancorato in
+// Bitcoin tramite i calendar server pubblici del protocollo OpenTimestamps
+// (gratuiti, nessuna criptovaluta da gestire). La prova .ots emessa qui è
+// "pending": matura in poche ore con la conferma on-chain ed è verificabile
+// (e aggiornabile) da chiunque su https://opentimestamps.org o col client ots.
+// Terza àncora indipendente accanto a firma HMAC e marca temporale TSA.
+
+const OTS_CALENDARS = [
+  "https://alice.btc.calendar.opentimestamps.org",
+  "https://bob.btc.calendar.opentimestamps.org",
+];
+
+// \x00OpenTimestamps\x00\x00Proof\x00\xbf\x89\xe2\xe8\x84\xe8\x92\x94
+const OTS_MAGIC = new Uint8Array([
+  0x00,0x4f,0x70,0x65,0x6e,0x54,0x69,0x6d,0x65,0x73,0x74,0x61,0x6d,0x70,0x73,
+  0x00,0x00,0x50,0x72,0x6f,0x6f,0x66,0x00,0xbf,0x89,0xe2,0xe8,0x84,0xe8,0x92,0x94,
+]);
+
+function hexToBytes(hex) {
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  return out;
+}
+
+function concatBytes(...arrs) {
+  const out = new Uint8Array(arrs.reduce((n, a) => n + a.length, 0));
+  let off = 0;
+  for (const a of arrs) { out.set(a, off); off += a.length; }
+  return out;
+}
+
+// varuint LEB128 a 7 bit (bit alto = continuazione), come da serializzazione OTS
+function otsVaruint(n) {
+  const out = [];
+  while (n > 0x7f) { out.push((n & 0x7f) | 0x80); n >>>= 7; }
+  out.push(n);
+  return new Uint8Array(out);
+}
+
+const otsVarbytes = (b) => concatBytes(otsVaruint(b.length), b);
+
+// Crea la prova .ots per un digest sha256 (hex). Come il client ufficiale,
+// ai calendar non si invia il digest nudo ma sha256(digest‖nonce): privacy.
+// Ritorna null se nessun calendar risponde (fail-open a carico del chiamante).
+async function createOtsProof(sha256hex) {
+  const digest = hexToBytes(sha256hex);
+  const nonce  = crypto.getRandomValues(new Uint8Array(16));
+  const m1 = new Uint8Array(await crypto.subtle.digest("SHA-256", concatBytes(digest, nonce)));
+
+  const responses = [];
+  for (const cal of OTS_CALENDARS) {
+    try {
+      const res = await fetch(`${cal}/digest`, {
+        method: "POST",
+        headers: { Accept: "application/vnd.opentimestamps.v1", "User-Agent": "imgauth-ots" },
+        body: m1,
+      });
+      if (res.ok) responses.push(new Uint8Array(await res.arrayBuffer()));
+    } catch { /* calendar irraggiungibile: si prosegue con gli altri */ }
+  }
+  if (responses.length === 0) return null;
+
+  // DetachedTimestampFile: MAGIC + version + op sha256 (0x08) + digest, poi
+  // l'albero: append(nonce) [0xf0] → sha256 [0x08] → risposte dei calendar
+  // (rami multipli: ogni ramo non-ultimo è preceduto dal tag 0xff).
+  // Formato validato contro la libreria python-opentimestamps.
+  const parts = [OTS_MAGIC, otsVaruint(1), new Uint8Array([0x08]), digest,
+                 new Uint8Array([0xf0]), otsVarbytes(nonce), new Uint8Array([0x08])];
+  for (let i = 0; i < responses.length - 1; i++) parts.push(new Uint8Array([0xff]), responses[i]);
+  parts.push(responses[responses.length - 1]);
+  return concatBytes(...parts);
+}
+
+// Garantisce la presenza della prova .ots in R2 per l'hash dato; idempotente
+// (la prima prova è anche la più antica: non va sovrascritta). Ritorna l'URL
+// pubblico di download oppure null (fail-open: mai bloccare l'emissione).
+async function ensureOtsProof(sha256hex, env) {
+  if (!env?.PDF_ARCHIVE) return null;
+  const hash = sha256hex.toLowerCase();
+  const key  = `ots/${hash}.ots`;
+  const url  = `https://imgauth.spaziogenesi.org/api/ots?hash=${hash}`;
+  try {
+    if (await env.PDF_ARCHIVE.head(key)) return url;
+    const proof = await createOtsProof(hash);
+    if (!proof) return null;
+    await env.PDF_ARCHIVE.put(key, proof, {
+      httpMetadata: { contentType: "application/vnd.opentimestamps.ots" },
+    });
+    return url;
+  } catch {
+    return null;
+  }
+}
+
+async function handleOts(url, env) {
+  const hash = String(url.searchParams.get("hash") ?? "").toLowerCase();
+  if (!HEX64.test(hash)) {
+    return jsonResponse({ error: "Parametro hash mancante o non valido." }, 400);
+  }
+  if (!env?.PDF_ARCHIVE) {
+    return jsonResponse({ error: "Archivio non configurato." }, 503);
+  }
+  const obj = await env.PDF_ARCHIVE.get(`ots/${hash}.ots`);
+  if (!obj) {
+    return jsonResponse({ error: "Nessuna prova OpenTimestamps per questo hash." }, 404);
+  }
+  return new Response(obj.body, {
+    status: 200,
+    headers: {
+      "Content-Type": "application/vnd.opentimestamps.ots",
+      "Content-Disposition": `attachment; filename="${hash}.ots"`,
+      ...corsHeaders(),
+    },
+  });
 }
 
