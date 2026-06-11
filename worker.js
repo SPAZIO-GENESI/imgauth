@@ -397,14 +397,17 @@ async function fillCertificatePdf(d, meta) {
   // l'impronta inserita, senza doverla digitare a mano.
   drawCentered(verifyUrl, 324.358, 7, oro);
 
-  // ── Blocco "Dettagli tecnici" ───────────────────────────────────────────────
-  // Disegnato nello spazio libero sotto il footer (dal credito "tangram" in giù
-  // la pagina è vuota fino al bordo). Contiene gli eventuali dati dichiarati
-  // dall'autore, la firma HMAC e la versione del motore — tutte informazioni
-  // che il box ATTESTAZIONE (32pt) non può ospitare. A-capo a misura di parola
-  // sulla larghezza utile; le parole oltre-larghezza vengono spezzate.
+  // ── Blocchi in fondo pagina ─────────────────────────────────────────────────
+  // Lo spazio libero sotto il credito "tangram" (~y 280) fino al bordo ospita:
+  //  1. "Dati dichiarati dall'autore" — leggibile (8pt, scuro): titolo/autore/
+  //     anno/note. Il box AcroForm DATI DELL'OPERA del template è fisso (solo
+  //     file/dimensione/MIME), quindi i dati dichiarati vivono qui, ben visibili.
+  //  2. "Dettagli tecnici" — fine print (6.5pt grigio): firma HMAC, emittente,
+  //     versione motore, nome file, link sito.
+  // A-capo a misura di parola; le parole oltre-larghezza vengono spezzate.
   const BLOCK_X = 56.4, BLOCK_W = 482.3;
-  let blockY = 252;
+  const nero = rgb(0.12, 0.12, 0.12); // testo scuro leggibile per i dati dichiarati
+  let blockY = 270;
   const drawWrapped = (text, size, color) => {
     let line = "";
     const flush = () => {
@@ -428,20 +431,25 @@ async function fillCertificatePdf(d, meta) {
     flush();
   };
 
-  drawWrapped("Dettagli tecnici dell'attestazione", 7.5, oro);
-  blockY -= 2;
+  // 1) Dati dichiarati dall'autore — leggibili, solo se presenti
   const hasDeclared = meta && (meta.titolo || meta.autore || meta.anno || meta.note);
-  if (meta?.titolo) drawWrapped(`Titolo dell'opera (dichiarato): ${meta.titolo}`, 7, grigio);
-  if (meta?.autore) drawWrapped(`Autore (dichiarato): ${meta.autore}`, 7, grigio);
-  if (meta?.anno)   drawWrapped(`Anno/versione (dichiarato): ${meta.anno}`, 7, grigio);
-  if (meta?.note)   drawWrapped(`Note (dichiarate): ${meta.note}`, 7, grigio);
-  if (d.hmac)       drawWrapped(`Firma HMAC (server): ${String(d.hmac)}`, 7, grigio);
-  drawWrapped(`Emesso da: ${String(d.emesso_da ?? "Spazio Genesi ETS — Attestazione Opere")} — Motore: imgauth v${APP_VERSION}`, 7, grigio);
-  drawWrapped("Sito dell'associazione: https://spaziogenesi.org", 7, oro);
   if (hasDeclared) {
+    drawWrapped("Dati dichiarati dall'autore", 8.5, oro);
     blockY -= 2;
-    drawWrapped("I dati “dichiarati” sono forniti dall'autore al momento dell'attestazione e sono vincolati alla firma HMAC: non possono essere modificati dopo l'emissione. Non costituiscono prova di paternità dell'opera.", 6.5, grigio);
+    if (meta.titolo) drawWrapped(`Titolo: ${meta.titolo}`, 8, nero);
+    if (meta.autore) drawWrapped(`Autore: ${meta.autore}`, 8, nero);
+    if (meta.anno)   drawWrapped(`Anno/versione: ${meta.anno}`, 8, nero);
+    if (meta.note)   drawWrapped(`Note: ${meta.note}`, 8, nero);
+    drawWrapped("Dati forniti dall'autore al momento dell'attestazione e vincolati alla firma HMAC: non modificabili dopo l'emissione. Non costituiscono prova di paternità dell'opera.", 6.5, grigio);
+    blockY -= 5;
   }
+
+  // 2) Dettagli tecnici — fine print
+  drawWrapped("Dettagli tecnici", 7.5, oro);
+  blockY -= 1;
+  if (d.hmac) drawWrapped(`Firma HMAC (server): ${String(d.hmac)}`, 6.5, grigio);
+  drawWrapped(`Emesso da: ${String(d.emesso_da ?? "Spazio Genesi ETS — Attestazione Opere")} — Motore: imgauth v${APP_VERSION} — File: ${String(d.opera ?? "")}`, 6.5, grigio);
+  drawWrapped("Sito dell'associazione: https://spaziogenesi.org", 6.5, oro);
 
   const bytes = await doc.save();
   return new Uint8Array(bytes);
