@@ -13,8 +13,8 @@
     "url": "git+https://github.com/SPAZIO-GENESI/imgauth.git"
   },
   "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "author": "Spazio Genesi ETS",
+  "license": "AGPL-3.0-only",
   "bugs": {
     "url": "https://github.com/SPAZIO-GENESI/imgauth/issues"
   },
