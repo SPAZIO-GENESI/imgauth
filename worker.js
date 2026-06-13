@@ -4,7 +4,9 @@
  *   POST /api/hash      → genera hash SHA-256 + attestazione + HMAC
  *   POST /api/verify    → verifica hash dichiarato vs file
  *   POST /api/cert-pdf  → compila certificato_opera_pdf_mod.pdf e restituisce il PDF;
- *                         salva copia in R2 sotto pdf/ (binding PDF_ARCHIVE)
+ *                         salva copia in R2 sotto pdf/<sha256>/ (binding PDF_ARCHIVE)
+ *   GET  /api/cert      → recupero certificato smarrito: restituisce dal R2 il PDF
+ *                         archiviato per ?hash=<sha256> (prima emissione)
  *   GET  /ping          → health check
  */
 
@@ -163,7 +165,7 @@ export default {
       if (await isRateLimited(env.RL_CERT, ip)) return tooManyResponse();
     } else if (method === "POST" && (path === "/api/hash" || path === "/api/verify")) {
       if (await isRateLimited(env.RL_API, ip)) return tooManyResponse();
-    } else if (method === "GET" && path === "/api/ots") {
+    } else if (method === "GET" && (path === "/api/ots" || path === "/api/cert")) {
       if (await isRateLimited(env.RL_API, ip)) return tooManyResponse();
     }
 
@@ -172,6 +174,7 @@ export default {
     if (method === "POST" && path === "/api/verify")   return handleVerify(request, env);
     if (method === "POST" && path === "/api/cert-pdf") return handlePdf(request, env);
     if (method === "GET"  && path === "/api/ots")      return handleOts(url, env);
+    if (method === "GET"  && path === "/api/cert")     return handleCert(url, env);
 
     return jsonResponse({ error: "Endpoint non trovato", path }, 404);
   },
@@ -523,8 +526,12 @@ async function handlePdf(request, env) {
       finalBytes = new Uint8Array(await signRes.arrayBuffer());
     }
 
+    // Chiave R2 con l'hash come prefisso: rende il certificato recuperabile da
+    // GET /api/cert?hash= (recupero certificato smarrito). I certificati emessi
+    // prima di questo schema (pdf/certificato_<stamp>.pdf) restano in archivio
+    // ma non sono indicizzati per hash.
     const stamp = certFilenameStamp();
-    const key = `pdf/certificato_${stamp}.pdf`;
+    const key = `pdf/${sha256.toLowerCase()}/certificato_${stamp}.pdf`;
 
     if (env?.PDF_ARCHIVE) {
       await env.PDF_ARCHIVE.put(key, finalBytes, {
@@ -703,6 +710,41 @@ async function handleOts(url, env) {
     headers: {
       "Content-Type": "application/vnd.opentimestamps.ots",
       "Content-Disposition": `attachment; filename="${hash}.ots"`,
+      ...corsHeaders(),
+    },
+  });
+}
+
+// ── /api/cert — recupero certificato smarrito ────────────────────────────────
+// Restituisce dal R2 il certificato PDF archiviato per l'hash richiesto.
+// Modello di fiducia identico al QR/?hash=: il certificato è ottenibile solo da
+// chi conosce l'hash, cioè da chi possiede il file o il certificato stesso.
+// Se per la stessa opera esistono più emissioni, si restituisce la PIÙ ANTICA:
+// è quella con la data più probante, coerente con la prova OTS (anch'essa la
+// prima e non sovrascrivibile). I nomi timestampati ordinano cronologicamente.
+
+async function handleCert(url, env) {
+  const hash = String(url.searchParams.get("hash") ?? "").toLowerCase();
+  if (!HEX64.test(hash)) {
+    return jsonResponse({ error: "Parametro hash mancante o non valido." }, 400);
+  }
+  if (!env?.PDF_ARCHIVE) {
+    return jsonResponse({ error: "Archivio non configurato." }, 503);
+  }
+  const listed = await env.PDF_ARCHIVE.list({ prefix: `pdf/${hash}/` });
+  const keys = (listed?.objects ?? []).map(o => o.key).sort();
+  if (keys.length === 0) {
+    return jsonResponse({ error: "Nessun certificato in archivio per questo hash." }, 404);
+  }
+  const obj = await env.PDF_ARCHIVE.get(keys[0]);
+  if (!obj) {
+    return jsonResponse({ error: "Nessun certificato in archivio per questo hash." }, 404);
+  }
+  return new Response(obj.body, {
+    status: 200,
+    headers: {
+      "Content-Type": "application/pdf",
+      "Content-Disposition": `attachment; filename="certificato-${hash.slice(0, 12)}.pdf"`,
       ...corsHeaders(),
     },
   });
