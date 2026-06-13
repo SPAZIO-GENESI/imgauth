@@ -47,7 +47,37 @@ jobs:
             const { owner, repo } = context.repo;
             const CRITICI = ["worker", "archive", "signer"]; // anchor = fail-open, solo informativo
 
-            // Notifica Telegram (no-op se i secret non sono configurati)
+            // ── Formattazione messaggio Telegram (semafori grafici) ──
+            const NOMI = {
+              worker:  "Generazione attestazione",
+              signer:  "Firma certificato (PDF)",
+              archive: "Archivio e recupero",
+              anchor:  "Ancoraggio blockchain",
+            };
+            const PALLINO = { ok: "🟢", down: "🔴", degraded: "🟡" };
+            const STATO   = { ok: "operativo", down: "non disponibile", degraded: "rallentato" };
+            const pallino = v => PALLINO[v] || "⚪";
+            const stato   = v => STATO[v] || "non rilevato";
+            function oraUtc(iso) {
+              const d = iso ? new Date(iso) : new Date();
+              if (isNaN(d.getTime())) return iso || "";
+              const p = n => String(n).padStart(2, "0");
+              return `${p(d.getUTCDate())}/${p(d.getUTCMonth() + 1)}/${d.getUTCFullYear()} ` +
+                     `${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())} UTC`;
+            }
+            function messaggio(titolo, s) {
+              const righe = [titolo, ""];
+              if (s) {
+                for (const k of ["worker", "signer", "archive", "anchor"]) {
+                  righe.push(`${pallino(s[k])} ${NOMI[k]}: ${stato(s[k])}`);
+                }
+                righe.push("", `🕓 Controllo: ${oraUtc(s.checked_at)}`);
+              } else {
+                righe.push("⚠️ Endpoint /api/status irraggiungibile.", "", `🕓 Controllo: ${oraUtc(null)}`);
+              }
+              return righe.join("\n");
+            }
+
             async function telegram(text) {
               const token = process.env.TELEGRAM_BOT_TOKEN;
               const chat = process.env.TELEGRAM_CHAT_ID;
@@ -63,16 +93,17 @@ jobs:
 
             // 1) Sonda
             let problems = [];
+            let statusObj = null;
             let detail = "n/d";
             try {
               const res = await fetch(URL, { signal: AbortSignal.timeout(15000) });
               if (!res.ok) {
                 problems.push(`risposta HTTP ${res.status}`);
               } else {
-                const s = await res.json();
-                detail = JSON.stringify(s);
-                for (const k of CRITICI) if (s[k] !== "ok") problems.push(`${k} = ${s[k]}`);
-                if (s.anchor && s.anchor !== "ok") core.warning(`anchor = ${s.anchor} (non critico)`);
+                statusObj = await res.json();
+                detail = JSON.stringify(statusObj);
+                for (const k of CRITICI) if (statusObj[k] !== "ok") problems.push(`${k} = ${statusObj[k]}`);
+                if (statusObj.anchor && statusObj.anchor !== "ok") core.warning(`anchor = ${statusObj.anchor} (non critico)`);
               }
             } catch (e) {
               problems.push(`endpoint irraggiungibile (${e.message})`);
@@ -97,7 +128,7 @@ jobs:
                 const created = await github.rest.issues.create({
                   owner, repo, title: "🔴 Disservizio rilevato (/api/status)", body, labels: [LABEL],
                 });
-                await telegram(`🔴 Spazio Genesi — disservizio rilevato\n${problems.join("\n")}\n${detail}\nIssue #${created.data.number}`);
+                await telegram(messaggio("🔴 Spazio Genesi — disservizio rilevato", statusObj));
               }
               core.setFailed("Problemi: " + problems.join(", "));
             } else {
@@ -109,10 +140,9 @@ jobs:
                   body: `✅ Servizi tornati operativi.\n\n\`\`\`json\n${detail}\n\`\`\`\n\nControllo: ${now}`,
                 });
                 await github.rest.issues.update({ owner, repo, issue_number: existing.number, state: "closed" });
-                await telegram(`✅ Spazio Genesi — servizi tornati operativi\n${detail}`);
+                await telegram(messaggio("✅ Spazio Genesi — servizi tornati operativi", statusObj));
               } else if (context.eventName === "workflow_dispatch") {
-                // Esecuzione manuale con tutto ok: messaggio di prova, per verificare
-                // che la notifica Telegram sia configurata correttamente.
-                await telegram(`✅ Test monitor Spazio Genesi: tutti i servizi operativi.\n${detail}`);
+                // Esecuzione manuale con tutto ok: messaggio di prova.
+                await telegram(messaggio("✅ Spazio Genesi — test monitor", statusObj));
               }
             }
