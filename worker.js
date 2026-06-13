@@ -7,6 +7,8 @@
  *                         salva copia in R2 sotto pdf/<sha256>/ (binding PDF_ARCHIVE)
  *   GET  /api/cert      → recupero certificato smarrito: restituisce dal R2 il PDF
  *                         archiviato per ?hash=<sha256> (prima emissione)
+ *   GET  /api/badge     → badge SVG "Opera attestata" per ?hash=<sha256> (embed
+ *                         su siti/social); verde solo se l'hash è in archivio
  *   GET  /ping          → health check
  */
 
@@ -165,7 +167,7 @@ export default {
       if (await isRateLimited(env.RL_CERT, ip)) return tooManyResponse();
     } else if (method === "POST" && (path === "/api/hash" || path === "/api/verify")) {
       if (await isRateLimited(env.RL_API, ip)) return tooManyResponse();
-    } else if (method === "GET" && (path === "/api/ots" || path === "/api/cert")) {
+    } else if (method === "GET" && (path === "/api/ots" || path === "/api/cert" || path === "/api/badge")) {
       if (await isRateLimited(env.RL_API, ip)) return tooManyResponse();
     }
 
@@ -175,6 +177,7 @@ export default {
     if (method === "POST" && path === "/api/cert-pdf") return handlePdf(request, env);
     if (method === "GET"  && path === "/api/ots")      return handleOts(url, env);
     if (method === "GET"  && path === "/api/cert")     return handleCert(url, env);
+    if (method === "GET"  && path === "/api/badge")    return handleBadge(url, env);
 
     return jsonResponse({ error: "Endpoint non trovato", path }, 404);
   },
@@ -748,5 +751,65 @@ async function handleCert(url, env) {
       ...corsHeaders(),
     },
   });
+}
+
+// ── /api/badge — badge SVG "Opera attestata" ─────────────────────────────────
+// Badge a due segmenti (stile shields) incorporabile via <img> su siti e social.
+// Mostra "opera attestata" (oro) SOLO se per quell'hash esiste davvero qualcosa
+// in archivio (certificato o prova OpenTimestamps); altrimenti "non attestata"
+// (grigio). Così il badge non è falsificabile: riflette lo stato reale e, cliccato,
+// porta alla pagina di verifica dove il visitatore conferma con il file originale.
+
+function badgeSvg(value, valueColor) {
+  const LW = 86, VW = 120, H = 28, W = LW + VW;
+  // Font generico (no dipendenze esterne); testo controllato (niente input utente).
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" role="img" aria-label="Spazio Genesi: ${value}">
+  <rect width="${W}" height="${H}" rx="4" fill="#1f1f1f"/>
+  <path d="M${LW} 0h${VW - 4}a4 4 0 0 1 4 4v${H - 8}a4 4 0 0 1-4 4H${LW}z" fill="${valueColor}"/>
+  <g font-family="Verdana,Geneva,DejaVu Sans,sans-serif" font-size="11" fill="#fff" text-anchor="middle">
+    <text x="${LW / 2}" y="18">Spazio Genesi</text>
+    <text x="${LW + VW / 2}" y="18">${value}</text>
+  </g>
+</svg>`;
+}
+
+function badgeResponse(svg) {
+  return new Response(svg, {
+    status: 200,
+    headers: {
+      "Content-Type": "image/svg+xml; charset=utf-8",
+      // Cache lato browser/edge: il badge cambia di rado (al più da "non attestata"
+      // a "attestata" la prima volta). 1h tiene basso il carico sul Worker.
+      "Cache-Control": "public, max-age=3600",
+      ...corsHeaders(),
+    },
+  });
+}
+
+async function handleBadge(url, env) {
+  const hash = String(url.searchParams.get("hash") ?? "").toLowerCase();
+  // Per un <img> non si restituisce mai un errore HTTP (mostrerebbe l'icona rotta):
+  // a hash malformato si risponde con un badge grigio esplicativo.
+  if (!HEX64.test(hash)) {
+    return badgeResponse(badgeSvg("hash non valido", "#9aa0a6"));
+  }
+  let attested = false;
+  if (env?.PDF_ARCHIVE) {
+    try {
+      // Prova OpenTimestamps (dalla 1.7) o certificato indicizzato (dalla 1.8):
+      // basta una delle due per considerare l'opera attestata.
+      if (await env.PDF_ARCHIVE.head(`ots/${hash}.ots`)) {
+        attested = true;
+      } else {
+        const listed = await env.PDF_ARCHIVE.list({ prefix: `pdf/${hash}/`, limit: 1 });
+        attested = (listed?.objects?.length ?? 0) > 0;
+      }
+    } catch {
+      attested = false;
+    }
+  }
+  return attested
+    ? badgeResponse(badgeSvg("✓ opera attestata", "#8B6914"))
+    : badgeResponse(badgeSvg("non attestata", "#9aa0a6"));
 }
 
