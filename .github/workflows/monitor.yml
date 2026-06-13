@@ -110,5 +110,9 @@ jobs:
                 });
                 await github.rest.issues.update({ owner, repo, issue_number: existing.number, state: "closed" });
                 await telegram(`✅ Spazio Genesi — servizi tornati operativi\n${detail}`);
+              } else if (context.eventName === "workflow_dispatch") {
+                // Esecuzione manuale con tutto ok: messaggio di prova, per verificare
+                // che la notifica Telegram sia configurata correttamente.
+                await telegram(`✅ Test monitor Spazio Genesi: tutti i servizi operativi.\n${detail}`);
               }
             }
