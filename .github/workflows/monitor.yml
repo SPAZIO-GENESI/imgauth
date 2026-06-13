@@ -1,0 +1,105 @@
+# Guardiano esterno dello stato del servizio.
+# Interroga periodicamente /api/status (che aggrega worker, archivio R2,
+# firmatario authart e calendar OpenTimestamps) e, in caso di guasto:
+#   - apre una issue di alert (o commenta quella aperta, niente spam);
+#   - fa fallire il run → GitHub invia l'email di workflow fallito.
+# Quando i servizi tornano operativi, commenta e RICHIUDE la issue.
+#
+# Nessun segreto richiesto: usa il GITHUB_TOKEN automatico.
+# Nota: i run schedulati di GitHub possono subire ritardi (qualche minuto) e
+# vengono sospesi dopo 60 giorni di inattività del repo. È un guardiano
+# best-effort: per SLA stringenti valutare un servizio di uptime dedicato.
+
+name: Monitor /api/status
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"   # ogni 15 minuti (UTC)
+  workflow_dispatch:          # esecuzione manuale per test
+
+permissions:
+  issues: write
+  contents: read
+
+concurrency:
+  group: status-monitor
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Controlla /api/status e gestisci gli alert
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const URL = "https://imgauth.spaziogenesi.org/api/status";
+            const LABEL = "status-alert";
+            const { owner, repo } = context.repo;
+
+            // Componenti critici (anchor è fail-open → solo informativo)
+            const CRITICI = ["worker", "archive", "signer"];
+
+            let problems = [];
+            let detail = "n/d";
+            try {
+              const res = await fetch(URL, { signal: AbortSignal.timeout(15000) });
+              if (!res.ok) {
+                problems.push(`risposta HTTP ${res.status}`);
+              } else {
+                const s = await res.json();
+                detail = JSON.stringify(s);
+                for (const k of CRITICI) {
+                  if (s[k] !== "ok") problems.push(`${k} = ${s[k]}`);
+                }
+                if (s.anchor && s.anchor !== "ok") {
+                  core.warning(`anchor (OpenTimestamps) = ${s.anchor} — non critico`);
+                }
+              }
+            } catch (e) {
+              problems.push(`endpoint irraggiungibile (${e.message})`);
+            }
+
+            // Issue di alert eventualmente già aperta
+            const open = await github.rest.issues.listForRepo({
+              owner, repo, state: "open", labels: LABEL, per_page: 1,
+            });
+            const existing = open.data[0];
+            const now = new Date().toISOString();
+
+            if (problems.length) {
+              const body = [
+                "Rilevato un problema sui servizi (`/api/status`):",
+                "",
+                ...problems.map(p => `- ${p}`),
+                "",
+                "```json",
+                detail,
+                "```",
+                "",
+                `Controllo: ${now}`,
+              ].join("\n");
+
+              if (existing) {
+                await github.rest.issues.createComment({ owner, repo, issue_number: existing.number, body });
+                console.log(`Aggiornata issue #${existing.number}`);
+              } else {
+                const created = await github.rest.issues.create({
+                  owner, repo,
+                  title: "🔴 Disservizio rilevato (/api/status)",
+                  body, labels: [LABEL],
+                });
+                console.log(`Aperta issue #${created.data.number}`);
+              }
+              core.setFailed("Problemi: " + problems.join(", "));
+            } else {
+              console.log("OK: " + detail);
+              if (existing) {
+                await github.rest.issues.createComment({
+                  owner, repo, issue_number: existing.number,
+                  body: `✅ Servizi tornati operativi.\n\n\`\`\`json\n${detail}\n\`\`\`\n\nControllo: ${now}`,
+                });
+                await github.rest.issues.update({ owner, repo, issue_number: existing.number, state: "closed" });
+                console.log(`Richiusa issue #${existing.number}`);
+              }
+            }
