@@ -9,6 +9,8 @@
  *                         archiviato per ?hash=<sha256> (prima emissione)
  *   GET  /api/badge     → badge SVG "Opera attestata" per ?hash=<sha256> (embed
  *                         su siti/social); verde solo se l'hash è in archivio
+ *   GET  /api/status    → stato semaforico dei servizi (worker, archivio R2,
+ *                         firmatario authart, calendar OpenTimestamps); cachato 180s
  *   GET  /ping          → health check
  */
 
@@ -151,7 +153,7 @@ function hmacMessage(attest, meta) {
 // ── Entry point ──────────────────────────────────────────────────────────────
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const method = request.method.toUpperCase();
     const url    = new URL(request.url);
     const path   = url.pathname;
@@ -174,10 +176,11 @@ export default {
     if (method === "GET"  && path === "/ping")        return handlePing(request);
     if (method === "POST" && path === "/api/hash")     return handleHash(request, env);
     if (method === "POST" && path === "/api/verify")   return handleVerify(request, env);
-    if (method === "POST" && path === "/api/cert-pdf") return handlePdf(request, env);
+    if (method === "POST" && path === "/api/cert-pdf") return handlePdf(request, env, ctx);
     if (method === "GET"  && path === "/api/ots")      return handleOts(url, env);
     if (method === "GET"  && path === "/api/cert")     return handleCert(url, env);
     if (method === "GET"  && path === "/api/badge")    return handleBadge(url, env);
+    if (method === "GET"  && path === "/api/status")   return handleStatus(env, ctx);
 
     return jsonResponse({ error: "Endpoint non trovato", path }, 404);
   },
@@ -467,7 +470,7 @@ async function fillCertificatePdf(d, meta, otsUrl) {
   return new Uint8Array(bytes);
 }
 
-async function handlePdf(request, env) {
+async function handlePdf(request, env, ctx) {
   try {
     const d = await request.json();
 
@@ -540,6 +543,12 @@ async function handlePdf(request, env) {
       await env.PDF_ARCHIVE.put(key, finalBytes, {
         httpMetadata: { contentType: "application/pdf" },
       });
+    }
+
+    // Notifica Telegram "nuovo certificato" (post-risposta, fail-safe): non blocca
+    // né fa fallire l'emissione. Vedi notifyCertProduced / env CERT_NOTIFY_EVERY.
+    if (ctx && typeof ctx.waitUntil === "function") {
+      ctx.waitUntil(notifyCertProduced(env, sha256, meta, d.timestamp_leggibile));
     }
 
     return pdfResponse(finalBytes);
@@ -773,14 +782,16 @@ function badgeSvg(value, valueColor) {
 </svg>`;
 }
 
-function badgeResponse(svg) {
+function badgeResponse(svg, maxAge = 60) {
   return new Response(svg, {
     status: 200,
     headers: {
       "Content-Type": "image/svg+xml; charset=utf-8",
-      // Cache lato browser/edge: il badge cambia di rado (al più da "non attestata"
-      // a "attestata" la prima volta). 1h tiene basso il carico sul Worker.
-      "Cache-Control": "public, max-age=3600",
+      // Cache differenziata per stato: il badge "non attestata" deve poter
+      // diventare "attestata" in fretta (max-age breve) — altrimenti una richiesta
+      // fatta prima che l'opera sia archiviata resterebbe grigia a lungo. Il verde,
+      // invece, non torna più indietro: si può cachare a lungo.
+      "Cache-Control": `public, max-age=${maxAge}`,
       ...corsHeaders(),
     },
   });
@@ -791,7 +802,7 @@ async function handleBadge(url, env) {
   // Per un <img> non si restituisce mai un errore HTTP (mostrerebbe l'icona rotta):
   // a hash malformato si risponde con un badge grigio esplicativo.
   if (!HEX64.test(hash)) {
-    return badgeResponse(badgeSvg("hash non valido", "#9aa0a6"));
+    return badgeResponse(badgeSvg("hash non valido", "#9aa0a6"), 300);
   }
   let attested = false;
   if (env?.PDF_ARCHIVE) {
@@ -808,8 +819,121 @@ async function handleBadge(url, env) {
       attested = false;
     }
   }
+  // Verde: cache lunga (lo stato "attestata" non torna indietro). Grigio: cache
+  // breve, così si auto-aggiorna a verde appena l'opera viene archiviata.
   return attested
-    ? badgeResponse(badgeSvg("✓ opera attestata", "#8B6914"))
-    : badgeResponse(badgeSvg("non attestata", "#9aa0a6"));
+    ? badgeResponse(badgeSvg("✓ opera attestata", "#8B6914"), 86400)
+    : badgeResponse(badgeSvg("non attestata", "#9aa0a6"), 60);
+}
+
+// ── /api/status — stato semaforico dei servizi ────────────────────────────────
+// Aggrega lo stato delle dipendenze raggiungibili dal worker. Esito cachato 180s
+// (per-isolate, best-effort) con stale-while-revalidate: dopo la scadenza si
+// restituisce subito il valore vecchio e si aggiorna in background (ctx.waitUntil),
+// così la pagina resta reattiva e Azure non viene svegliato a ogni visita.
+// Valori per componente: "ok" | "down" | "degraded" | "n/d".
+
+let _statusCache = null; // { data, ts }
+const STATUS_TTL = 180000; // 180s: traffico basso → meno risvegli di Azure
+
+async function fetchWithTimeout(url, ms, opts = {}) {
+  try {
+    return await fetch(url, { ...opts, signal: AbortSignal.timeout(ms) });
+  } catch {
+    return null;
+  }
+}
+
+async function computeStatus(env) {
+  const status = {
+    worker: "ok",          // se rispondiamo, il motore è su
+    archive: "n/d",
+    signer: "n/d",
+    anchor: "n/d",
+    checked_at: new Date().toISOString(),
+  };
+
+  // Archivio R2: una list minima; se erra/è assente → down.
+  if (env?.PDF_ARCHIVE) {
+    try {
+      await env.PDF_ARCHIVE.list({ limit: 1 });
+      status.archive = "ok";
+    } catch {
+      status.archive = "down";
+    }
+  }
+
+  // Firmatario authart: health su GET <base>/ (senza auth). Timeout generoso per
+  // assorbire il cold-start di Azure ed evitare falsi "down".
+  if (env?.SIGNER_URL) {
+    const base = String(env.SIGNER_URL).replace(/\/sign\/?$/, "/");
+    const r = await fetchWithTimeout(base, 8000, { method: "GET" });
+    status.signer = r && r.ok ? "ok" : "down";
+  }
+
+  // Calendar OpenTimestamps: conta la raggiungibilità (qualsiasi risposta HTTP);
+  // è già fail-open nel flusso, quindi al più "degraded" (informativo).
+  const r = await fetchWithTimeout(OTS_CALENDARS[0], 4000, { method: "GET" });
+  status.anchor = r ? "ok" : "degraded";
+
+  return status;
+}
+
+async function handleStatus(env, ctx) {
+  const now = Date.now();
+  if (_statusCache) {
+    if (now - _statusCache.ts < STATUS_TTL) {
+      return jsonResponse(_statusCache.data);
+    }
+    // Stale: restituisci subito il vecchio e aggiorna in background.
+    if (ctx && typeof ctx.waitUntil === "function") {
+      ctx.waitUntil((async () => {
+        try { _statusCache = { data: await computeStatus(env), ts: Date.now() }; } catch {}
+      })());
+    }
+    return jsonResponse(_statusCache.data);
+  }
+  // Prima chiamata (cache vuota): calcola in sincrono.
+  const data = await computeStatus(env);
+  _statusCache = { data, ts: now };
+  return jsonResponse(data);
+}
+
+// ── Notifica Telegram: nuovo certificato emesso ───────────────────────────────
+// Avvisa il gestore (chat Telegram) alla produzione di un certificato. Frequenza
+// configurabile via env CERT_NOTIFY_EVERY (1 = ogni certificato; es. 5 = un avviso
+// ogni 5). Contatore persistente in R2 (meta/cert-count). Tutto best-effort e
+// post-risposta (ctx.waitUntil): un errore qui non blocca l'emissione.
+// Segreti TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID come Cloudflare secrets.
+async function notifyCertProduced(env, sha256, meta, tsHuman) {
+  const token = env?.TELEGRAM_BOT_TOKEN, chat = env?.TELEGRAM_CHAT_ID;
+  if (!token || !chat || !env?.PDF_ARCHIVE) return;
+  const every = Math.max(1, parseInt(env.CERT_NOTIFY_EVERY || "1", 10) || 1);
+
+  // Contatore in R2 (read-modify-write; a basso traffico le race sono trascurabili).
+  let count = 0;
+  try {
+    const obj = await env.PDF_ARCHIVE.get("meta/cert-count");
+    if (obj) count = parseInt(await obj.text(), 10) || 0;
+  } catch { /* contatore assente o illeggibile: si riparte da 0 */ }
+  count += 1;
+  try { await env.PDF_ARCHIVE.put("meta/cert-count", String(count)); } catch {}
+
+  if (count % every !== 0) return; // avvisa solo ogni N
+
+  const righe = ["📄 Spazio Genesi — nuovo certificato emesso", ""];
+  if (meta?.titolo) righe.push(`Titolo: ${meta.titolo}`);
+  if (meta?.autore) righe.push(`Autore: ${meta.autore}`);
+  righe.push(`Impronta: ${sha256.slice(0, 12)}…`);
+  righe.push(`Totale emessi: ${count}${every > 1 ? ` · avviso ogni ${every}` : ""}`);
+  righe.push("", `🕓 ${tsHuman || new Date().toISOString()}`);
+
+  try {
+    await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: chat, text: righe.join("\n"), disable_web_page_preview: true }),
+    });
+  } catch { /* notifica best-effort */ }
 }
 

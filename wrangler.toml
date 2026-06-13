@@ -4,6 +4,13 @@ compatibility_date = "2024-09-23"
 
 [vars]
 SIGNER_URL = "https://sgart.azurewebsites.net/sign"
+# Notifica Telegram "nuovo certificato": un avviso ogni N certificati emessi.
+# "1" = avvisa per ogni certificato; "5" = un avviso ogni 5, ecc.
+# Per cambiare frequenza: modifica qui e `wrangler deploy` (oppure edita la var
+# nel dashboard Cloudflare → Worker imgauth → Settings → Variables).
+# La notifica parte solo se i secret TELEGRAM_BOT_TOKEN e TELEGRAM_CHAT_ID sono
+# impostati (wrangler secret put …).
+CERT_NOTIFY_EVERY = "1"
 
 # Template PDF come ArrayBuffer (import in worker.js)
 [[rules]]
@@ -18,6 +25,10 @@ fallthrough = true
 [[r2_buckets]]
 binding = "PDF_ARCHIVE"
 bucket_name = "imgauth-pdf-archive"
+# Giurisdizione EU: residenza dei dati in Europa (GDPR). Esiste un bucket omonimo
+# anche in giurisdizione default (più vecchio, ora non usato); il worker scrive/legge
+# SOLO quello EU grazie a questa riga. Switch fatto a clean slate (archivio svuotato).
+jurisdiction = "eu"
 
 # Rate limiting nativo (anti-abuso/DoS, per-IP). Vedi worker.js › fetch e
 # CLAUDE.md › Sicurezza emissione certificati. period: solo 10 o 60 secondi.
