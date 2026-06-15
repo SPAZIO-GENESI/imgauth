@@ -11,6 +11,8 @@
  *                         su siti/social); verde solo se l'hash è in archivio
  *   GET  /api/status    → stato semaforico dei servizi (worker, archivio R2,
  *                         firmatario authart, calendar OpenTimestamps); cachato 180s
+ *   GET  /api/status-history → storico 90 giorni per componente (per la pagina /status)
+ *   (cron) scheduled    → campiona lo stato e aggiorna il rollup giornaliero in R2
  *   GET  /ping          → health check
  */
 
@@ -181,8 +183,15 @@ export default {
     if (method === "GET"  && path === "/api/cert")     return handleCert(url, env);
     if (method === "GET"  && path === "/api/badge")    return handleBadge(url, env);
     if (method === "GET"  && path === "/api/status")   return handleStatus(env, ctx);
+    if (method === "GET"  && path === "/api/status-history") return handleStatusHistory(env, ctx);
 
     return jsonResponse({ error: "Endpoint non trovato", path }, 404);
+  },
+
+  // Cron trigger (vedi wrangler.toml › [triggers]): campiona lo stato e aggiorna
+  // il rollup giornaliero in R2, così la pagina /status ha dati anche senza visite.
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(sampleAndRecord(env).catch(() => {}));
   },
 };
 
@@ -879,24 +888,115 @@ async function computeStatus(env) {
   return status;
 }
 
+// Campiona lo stato, aggiorna la cache e registra il rollup giornaliero (storico).
+async function sampleAndRecord(env) {
+  const s = await computeStatus(env);
+  _statusCache = { data: s, ts: Date.now() };
+  try { await recordHistory(env, s); } catch {}
+  return s;
+}
+
 async function handleStatus(env, ctx) {
   const now = Date.now();
   if (_statusCache) {
     if (now - _statusCache.ts < STATUS_TTL) {
       return jsonResponse(_statusCache.data);
     }
-    // Stale: restituisci subito il vecchio e aggiorna in background.
+    // Stale: restituisci subito il vecchio e aggiorna in background (+ storico).
     if (ctx && typeof ctx.waitUntil === "function") {
-      ctx.waitUntil((async () => {
-        try { _statusCache = { data: await computeStatus(env), ts: Date.now() }; } catch {}
-      })());
+      ctx.waitUntil(sampleAndRecord(env).catch(() => {}));
     }
     return jsonResponse(_statusCache.data);
   }
   // Prima chiamata (cache vuota): calcola in sincrono.
-  const data = await computeStatus(env);
-  _statusCache = { data, ts: now };
-  return jsonResponse(data);
+  const s = await sampleAndRecord(env);
+  return jsonResponse(s);
+}
+
+// ── Storico stato (per la pagina /status, barre a 90 giorni) ──────────────────
+// Rollup GIORNALIERO per componente in R2 (status/history.json): per ogni giorno
+// si conserva lo stato PEGGIORE osservato. Alimentato dal cron del Worker (anche
+// senza visitatori) e dai refresh di /api/status. Finestra a scorrimento 90 giorni.
+const HISTORY_KEY = "status/history.json";
+const HISTORY_DAYS = 90;
+const HIST_COMPONENTS = ["worker", "signer", "archive", "anchor"];
+const SEV = { nodata: 0, ok: 1, degraded: 2, down: 3 };
+const dayUTC = (ms) => new Date(ms).toISOString().slice(0, 10);
+
+async function recordHistory(env, s) {
+  if (!env?.PDF_ARCHIVE) return;
+  const today = dayUTC(Date.now());
+  let hist = {};
+  try { const o = await env.PDF_ARCHIVE.get(HISTORY_KEY); if (o) hist = JSON.parse(await o.text()) || {}; } catch {}
+  let changed = false;
+  for (const k of HIST_COMPONENTS) {
+    const v = (s[k] === "ok" || s[k] === "down" || s[k] === "degraded") ? s[k] : "nodata";
+    if (v === "nodata") continue;
+    hist[k] = hist[k] || {};
+    const prev = hist[k][today] || "nodata";
+    const next = SEV[v] > SEV[prev] ? v : prev;
+    if (next !== prev) { hist[k][today] = next; changed = true; }
+  }
+  // Potatura oltre i 90 giorni (confronto lessicografico su YYYY-MM-DD)
+  const cutoff = dayUTC(Date.now() - HISTORY_DAYS * 86400000);
+  for (const k of HIST_COMPONENTS) {
+    if (!hist[k]) continue;
+    for (const d of Object.keys(hist[k])) if (d < cutoff && d !== "_updated") { delete hist[k][d]; changed = true; }
+  }
+  // Scrive se lo stato è cambiato OPPURE se l'ultimo controllo è più vecchio di 5
+  // minuti: così `_updated` riflette l'ULTIMO CONTROLLO (non l'ultimo cambiamento) e
+  // avanza regolarmente, senza però riscrivere a ogni richiesta sotto traffico.
+  const prevUpdated = hist._updated ? Date.parse(hist._updated) : 0;
+  const stale = (Date.now() - prevUpdated) > 5 * 60 * 1000;
+  if (changed || stale) {
+    hist._updated = new Date().toISOString();
+    try { await env.PDF_ARCHIVE.put(HISTORY_KEY, JSON.stringify(hist)); } catch {}
+  }
+}
+
+async function handleStatusHistory(env, ctx) {
+  // Auto-guarigione: se lo storico è vecchio (>10 min), campiona in background.
+  // Così la pagina /status resta fresca anche indipendentemente dal cron.
+  if (ctx && typeof ctx.waitUntil === "function" && env?.PDF_ARCHIVE) {
+    try {
+      const head = await env.PDF_ARCHIVE.get(HISTORY_KEY);
+      const upd = head ? (JSON.parse(await head.text())._updated || 0) : 0;
+      if (Date.now() - Date.parse(upd || 0) > 10 * 60 * 1000) {
+        ctx.waitUntil(sampleAndRecord(env).catch(() => {}));
+      }
+    } catch {}
+  }
+  const labels = {
+    worker: "Generazione dell'attestazione",
+    signer: "Firma del certificato (PDF)",
+    archive: "Archivio e recupero certificati",
+    anchor: "Ancoraggio blockchain",
+  };
+  let hist = {};
+  if (env?.PDF_ARCHIVE) {
+    try { const o = await env.PDF_ARCHIVE.get(HISTORY_KEY); if (o) hist = JSON.parse(await o.text()) || {}; } catch {}
+  }
+  const days = [];
+  for (let i = HISTORY_DAYS - 1; i >= 0; i--) days.push(dayUTC(Date.now() - i * 86400000));
+
+  const components = HIST_COMPONENTS.map((k) => {
+    const hk = hist[k] || {};
+    const arr = days.map((d) => ({ d, s: hk[d] || "nodata" }));
+    const withData = arr.filter((x) => x.s !== "nodata");
+    const ok = withData.filter((x) => x.s === "ok").length;
+    const uptime = withData.length ? Math.round((ok / withData.length) * 1000) / 10 : null;
+    return { key: k, label: labels[k], current: arr[arr.length - 1].s, uptime, days: arr };
+  });
+
+  let overall = "ok";
+  for (const c of components) {
+    if (!["worker", "signer", "archive"].includes(c.key)) continue;
+    if (c.current === "down") overall = "down";
+    else if (c.current === "degraded" && overall !== "down") overall = "degraded";
+    else if (c.current === "nodata" && overall === "ok") overall = "nodata";
+  }
+
+  return jsonResponse({ updated: hist._updated || null, window_days: HISTORY_DAYS, overall, components });
 }
 
 // ── Notifica Telegram: nuovo certificato emesso ───────────────────────────────
