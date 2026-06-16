@@ -2,6 +2,11 @@ name = "imgauth"
 main = "worker.js"
 compatibility_date = "2024-09-23"
 
+# Cron: campiona lo stato dei servizi e aggiorna il rollup giornaliero in R2
+# (status/history.json) per la pagina /status (barre 90 giorni). Ogni 30 minuti.
+[triggers]
+crons = ["*/30 * * * *"]
+
 [vars]
 SIGNER_URL = "https://sgart.azurewebsites.net/sign"
 # Notifica Telegram "nuovo certificato": un avviso ogni N certificati emessi.

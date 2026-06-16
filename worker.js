@@ -401,11 +401,12 @@ async function fillCertificatePdf(d, meta, otsUrl) {
     page.drawText(text, { x: (pageW - w) / 2, y, size, font, color });
   };
 
-  // Dati dell'ente su due righe: C.F. e sede legale (Roma), poi sede operativa
-  // (L'Aquila). La riga inferiore scende a y=296.5 per non toccare il credito
-  // "Realizzato da tangram" del template (~y 285).
+  // Dati dell'ente su due righe: C.F., iscrizione RUNTS e sede legale (Roma),
+  // poi sede operativa (L'Aquila). La riga inferiore scende a y=296.5 per non
+  // toccare il credito "Realizzato da tangram" del template (~y 285).
+  // Larghezze @7pt Times: riga 1 = 441.8pt, riga 2 = 431.2pt (utile ~505pt).
   drawCentered(
-    "Spazio Genesi ETS — Codice fiscale 96602450585 — Sede legale: Via Francesco Caracciolo 14, 00167 Roma (RM)",
+    "Spazio Genesi ETS — Codice fiscale 96602450585 — RUNTS rep. n. 174701 (15/06/2026) — Sede legale: Via Francesco Caracciolo 14, 00167 Roma (RM)",
     306.5, 7, grigio
   );
   drawCentered(
