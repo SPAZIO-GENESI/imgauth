@@ -12,6 +12,8 @@
  *   GET  /api/status    → stato semaforico dei servizi (worker, archivio R2,
  *                         firmatario authart, calendar OpenTimestamps); cachato 180s
  *   GET  /api/status-history → storico 90 giorni per componente (per la pagina /status)
+ *   GET  /api/health-log → eventi fini di salute per un giorno (?day=YYYY-MM-DD) da
+ *                         D1: errori, degradi e rallentamenti sotto soglia (drill-down /status)
  *   (cron) scheduled    → campiona lo stato e aggiorna il rollup giornaliero in R2
  *   GET  /ping          → health check
  */
@@ -184,6 +186,7 @@ export default {
     if (method === "GET"  && path === "/api/badge")    return handleBadge(url, env);
     if (method === "GET"  && path === "/api/status")   return handleStatus(env, ctx);
     if (method === "GET"  && path === "/api/status-history") return handleStatusHistory(env, ctx);
+    if (method === "GET"  && path === "/api/health-log") return handleHealthLog(url, env);
 
     return jsonResponse({ error: "Endpoint non trovato", path }, 404);
   },
@@ -854,22 +857,28 @@ async function fetchWithTimeout(url, ms, opts = {}) {
   }
 }
 
-async function computeStatus(env) {
-  const status = {
-    worker: "ok",          // se rispondiamo, il motore è su
-    archive: "n/d",
-    signer: "n/d",
-    anchor: "n/d",
-    checked_at: new Date().toISOString(),
-  };
+// Soglie di latenza per check (ms). "watch": lento ma il servizio NON degrada →
+// si registra un evento (status 'ok', cause 'slow') utile all'analisi, mentre la
+// barra del giorno resta verde. "degraded": oltre questa soglia il servizio è
+// considerato degradato (status 'degraded'). Tarabili.
+const HEALTH_WATCH    = { archive: 500,  signer: 2500, anchor: 2000 };
+const HEALTH_DEGRADED = { archive: 1000, signer: 5000, anchor: 4000 };
 
-  // Archivio R2: una list minima; se erra/è assente → down.
+// Esegue i check delle dipendenze MISURANDO la latenza. Ritorna un campione per
+// check: { check, up, status, latency, cause, detail }, con `status` in forma D1
+// ('ok'|'degraded'|'error'). Il mapping allo stato semaforico è in summarizeStatus.
+async function runChecks(env) {
+  const samples = [];
+
+  // Archivio R2: una list minima.
   if (env?.PDF_ARCHIVE) {
+    const t0 = Date.now();
     try {
       await env.PDF_ARCHIVE.list({ limit: 1 });
-      status.archive = "ok";
-    } catch {
-      status.archive = "down";
+      samples.push(gradeSample("archive", true, Date.now() - t0));
+    } catch (e) {
+      samples.push({ check: "archive", up: false, status: "error", latency: Date.now() - t0,
+        cause: "r2_error", detail: { message: String(e?.message || e).slice(0, 200) } });
     }
   }
 
@@ -877,28 +886,96 @@ async function computeStatus(env) {
   // assorbire il cold-start di Azure ed evitare falsi "down".
   if (env?.SIGNER_URL) {
     const base = String(env.SIGNER_URL).replace(/\/sign\/?$/, "/");
+    const t0 = Date.now();
     const r = await fetchWithTimeout(base, 8000, { method: "GET" });
-    status.signer = r && r.ok ? "ok" : "down";
+    const latency = Date.now() - t0;
+    if (r && r.ok) samples.push(gradeSample("signer", true, latency));
+    else samples.push({ check: "signer", up: false, status: "error", latency,
+      cause: r ? `http_${r.status}` : "timeout", detail: r ? { http: r.status } : null });
   }
 
   // Calendar OpenTimestamps: l'ancoraggio reale (ensureOtsProof) usa ENTRAMBI i
-  // calendar in fail-open, quindi qui basta che UNO risponda per dirsi "ok";
-  // "degraded" (informativo) solo se cadono TUTTI. Controllo in parallelo, timeout
-  // 6s per assorbire i rallentamenti transitori dei server pubblici della community.
-  const reach = await Promise.all(
-    OTS_CALENDARS.map((c) => fetchWithTimeout(c, 6000, { method: "GET" }))
-  );
-  status.anchor = reach.some((r) => r) ? "ok" : "degraded";
+  // calendar in fail-open, quindi basta che UNO risponda per dirsi "su"; se cadono
+  // TUTTI è "degraded" (informativo). Controllo in parallelo, timeout 6s. La latenza
+  // è il tempo totale del Promise.all (proxy del più lento a rispondere).
+  {
+    const t0 = Date.now();
+    const reach = await Promise.all(
+      OTS_CALENDARS.map((c) => fetchWithTimeout(c, 6000, { method: "GET" }))
+    );
+    const latency = Date.now() - t0;
+    if (reach.some((r) => r)) samples.push(gradeSample("anchor", true, latency));
+    else samples.push({ check: "anchor", up: false, status: "degraded", latency,
+      cause: "all_unreachable", detail: null });
+  }
 
+  return samples;
+}
+
+// Campione per i check ANDATI A BUON FINE: 'degraded' oltre la soglia degraded,
+// altrimenti 'ok' (con cause 'slow' se comunque oltre la soglia watch).
+function gradeSample(check, up, latency) {
+  let status = "ok", cause = null;
+  if (latency >= HEALTH_DEGRADED[check]) { status = "degraded"; cause = "slow"; }
+  else if (latency >= HEALTH_WATCH[check]) { cause = "slow"; }
+  return { check, up, status, latency, cause, detail: null };
+}
+
+// Mappa i campioni allo stato semaforico per componente (compat con la pagina
+// /status e il rollup R2): 'ok' | 'degraded' | 'down' | 'n/d'. Un check fallito è
+// 'down' (archive/signer) o 'degraded' (anchor, fail-open).
+function summarizeStatus(samples) {
+  const status = {
+    worker: "ok",          // se rispondiamo, il motore è su
+    archive: "n/d",
+    signer: "n/d",
+    anchor: "n/d",
+    checked_at: new Date().toISOString(),
+  };
+  for (const s of samples) {
+    if (s.up) status[s.check] = s.status === "degraded" ? "degraded" : "ok";
+    else status[s.check] = s.check === "anchor" ? "degraded" : "down";
+  }
   return status;
 }
 
-// Campiona lo stato, aggiorna la cache e registra il rollup giornaliero (storico).
+// Sommario semaforico (compat: se servisse altrove lo stato senza il log).
+async function computeStatus(env) {
+  return summarizeStatus(await runChecks(env));
+}
+
+// Campiona lo stato, aggiorna la cache, registra il rollup giornaliero (R2) e
+// logga su D1 gli eventi notevoli (errori, degradi, rallentamenti ≥ soglia watch).
 async function sampleAndRecord(env) {
-  const s = await computeStatus(env);
+  const samples = await runChecks(env);
+  const s = summarizeStatus(samples);
   _statusCache = { data: s, ts: Date.now() };
   try { await recordHistory(env, s); } catch {}
+  // Si scrive solo se l'evento è "notevole" (non ok-veloce): un giorno tutto liscio
+  // non lascia rumore nel log. La scrittura è non-blocking (try/catch in logHealth).
+  for (const smp of samples) {
+    const notable = smp.status !== "ok" || (smp.latency != null && smp.latency >= HEALTH_WATCH[smp.check]);
+    if (notable) await logHealth(env, smp);
+  }
   return s;
+}
+
+// Scrittura su D1 dell'evento di salute (non-blocking: un errore di log NON
+// interrompe il Worker). NB: colonna `check_name` perché `check` è parola
+// riservata in SQLite.
+async function logHealth(env, { status, latency, check, cause, detail }) {
+  if (!env?.DB) return;
+  try {
+    await env.DB.prepare(
+      `INSERT INTO health_log (ts, status, latency, check_name, cause, detail)
+       VALUES (?, ?, ?, ?, ?, ?)`
+    ).bind(
+      Date.now(), status, latency ?? null, check,
+      cause ?? null, detail ? JSON.stringify(detail) : null
+    ).run();
+  } catch (e) {
+    console.error("[health_log write failed]", e?.message);
+  }
 }
 
 async function handleStatus(env, ctx) {
@@ -1002,6 +1079,48 @@ async function handleStatusHistory(env, ctx) {
   }
 
   return jsonResponse({ updated: hist._updated || null, window_days: HISTORY_DAYS, overall, components });
+}
+
+// ── /api/health-log — eventi fini di salute per un giorno (da D1) ─────────────
+// Restituisce gli eventi registrati in health_log per una data (?day=YYYY-MM-DD,
+// default oggi UTC): errori, degradi e rallentamenti sotto soglia. Alimenta il
+// drill-down "esplora il giorno" della pagina /status — utile anche quando la
+// barra del giorno resta verde (rallentamenti che non degradano il servizio).
+const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+function safeJsonParse(s) { try { return JSON.parse(s); } catch { return s; } }
+
+async function handleHealthLog(url, env) {
+  const day = url.searchParams.get("day") || dayUTC(Date.now());
+  if (!DAY_RE.test(day)) {
+    return jsonResponse({ error: "Parametro 'day' non valido (atteso YYYY-MM-DD)" }, 400);
+  }
+  if (!env?.DB) return jsonResponse({ day, count: 0, events: [], note: "D1 non configurato" });
+
+  const start = Date.parse(day + "T00:00:00Z");
+  const end = start + 86400000;
+  try {
+    const { results } = await env.DB.prepare(
+      `SELECT ts, status, latency, check_name, cause, detail
+         FROM health_log
+        WHERE ts >= ? AND ts < ?
+        ORDER BY ts ASC
+        LIMIT 1000`
+    ).bind(start, end).all();
+    const events = (results || []).map((r) => ({
+      ts: r.ts,
+      iso: new Date(r.ts).toISOString(),
+      status: r.status,
+      latency: r.latency,
+      check: r.check_name,
+      cause: r.cause,
+      detail: r.detail ? safeJsonParse(r.detail) : null,
+    }));
+    return jsonResponse({ day, count: events.length, events });
+  } catch (e) {
+    console.error("[health-log read failed]", e?.message);
+    return jsonResponse({ day, count: 0, events: [], error: "Lettura storico non riuscita" });
+  }
 }
 
 // ── Notifica Telegram: nuovo certificato emesso ───────────────────────────────

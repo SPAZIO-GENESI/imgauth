@@ -52,3 +52,12 @@ namespace_id = "1002"
   [ratelimits.simple]
   limit = 60
   period = 60
+
+# D1: log fine degli eventi di salute (errori, degradi, rallentamenti sotto soglia)
+# campionati dai check di /api/status e dal cron. Esposto da GET /api/health-log per
+# il drill-down "esplora il giorno" della pagina /status. Binding `DB` (env.DB).
+# Scrittura non-blocking: un errore D1 non interrompe il Worker (vedi logHealth).
+[[d1_databases]]
+binding = "DB"
+database_name = "imgauth-health"
+database_id = "6120b7af-bf22-43de-b1f8-e28163dc5df1"
