@@ -881,10 +881,14 @@ async function computeStatus(env) {
     status.signer = r && r.ok ? "ok" : "down";
   }
 
-  // Calendar OpenTimestamps: conta la raggiungibilità (qualsiasi risposta HTTP);
-  // è già fail-open nel flusso, quindi al più "degraded" (informativo).
-  const r = await fetchWithTimeout(OTS_CALENDARS[0], 4000, { method: "GET" });
-  status.anchor = r ? "ok" : "degraded";
+  // Calendar OpenTimestamps: l'ancoraggio reale (ensureOtsProof) usa ENTRAMBI i
+  // calendar in fail-open, quindi qui basta che UNO risponda per dirsi "ok";
+  // "degraded" (informativo) solo se cadono TUTTI. Controllo in parallelo, timeout
+  // 6s per assorbire i rallentamenti transitori dei server pubblici della community.
+  const reach = await Promise.all(
+    OTS_CALENDARS.map((c) => fetchWithTimeout(c, 6000, { method: "GET" }))
+  );
+  status.anchor = reach.some((r) => r) ? "ok" : "degraded";
 
   return status;
 }
