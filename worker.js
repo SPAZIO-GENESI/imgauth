@@ -861,7 +861,11 @@ async function fetchWithTimeout(url, ms, opts = {}) {
 // si registra un evento (status 'ok', cause 'slow') utile all'analisi, mentre la
 // barra del giorno resta verde. "degraded": oltre questa soglia il servizio è
 // considerato degradato (status 'degraded'). Tarabili.
-const HEALTH_WATCH    = { archive: 500,  signer: 2500, anchor: 2000 };
+// ⚙️ Watch volutamente BASSI (fase di osservazione qualità fornitori, dal 2026-06-19):
+// servono a far emergere i rallentamenti per misurarne frequenza/durata. Si rialzano
+// una volta capito il baseline. Le soglie degraded restano alte (la barra pubblica non
+// va in giallo per lentezze minori).
+const HEALTH_WATCH    = { archive: 300,  signer: 1200, anchor: 1000 };
 const HEALTH_DEGRADED = { archive: 1000, signer: 5000, anchor: 4000 };
 
 // Esegue i check delle dipendenze MISURANDO la latenza. Ritorna un campione per
