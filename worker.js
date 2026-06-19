@@ -62,6 +62,16 @@ function jsonResponse(body, status = 200) {
   });
 }
 
+// Apre il CORS (origine *) per gli endpoint PUBBLICI di sola lettura (stato/salute):
+// i dati sono già pubblici sulla pagina /status, quindi sono monitorabili/embeddabili
+// da qualunque origine (cruscotti esterni, ecc.). Gli endpoint sensibili (hash, verify,
+// cert-pdf, …) restano ristretti ad ALLOWED_ORIGIN.
+function withPublicCors(resp) {
+  const h = new Headers(resp.headers);
+  h.set("Access-Control-Allow-Origin", "*");
+  return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers: h });
+}
+
 function pdfResponse(bytes) {
   return new Response(bytes, {
     status: 200,
@@ -184,9 +194,9 @@ export default {
     if (method === "GET"  && path === "/api/ots")      return handleOts(url, env);
     if (method === "GET"  && path === "/api/cert")     return handleCert(url, env);
     if (method === "GET"  && path === "/api/badge")    return handleBadge(url, env);
-    if (method === "GET"  && path === "/api/status")   return handleStatus(env, ctx);
-    if (method === "GET"  && path === "/api/status-history") return handleStatusHistory(env, ctx);
-    if (method === "GET"  && path === "/api/health-log") return handleHealthLog(url, env);
+    if (method === "GET"  && path === "/api/status")   return withPublicCors(await handleStatus(env, ctx));
+    if (method === "GET"  && path === "/api/status-history") return withPublicCors(await handleStatusHistory(env, ctx));
+    if (method === "GET"  && path === "/api/health-log") return withPublicCors(await handleHealthLog(url, env));
 
     return jsonResponse({ error: "Endpoint non trovato", path }, 404);
   },
