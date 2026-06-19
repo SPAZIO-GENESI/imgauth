@@ -1003,11 +1003,36 @@ const HISTORY_KEY = "status/history.json";
 const HISTORY_DAYS = 90;
 const HIST_COMPONENTS = ["worker", "signer", "archive", "anchor"];
 const SEV = { nodata: 0, ok: 1, degraded: 2, down: 3 };
-const dayUTC = (ms) => new Date(ms).toISOString().slice(0, 10);
+// I giorni dello storico (barre /status) e del log sono ancorati al fuso italiano
+// (Europe/Rome), NON a UTC: così barre ed eventi cadono nel giorno "giusto", in
+// particolare appena dopo la mezzanotte (Roma è UTC+1/+2). Il `ts` resta epoch assoluto.
+const ROME_TZ = "Europe/Rome";
+function dayRome(ms = Date.now()) {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: ROME_TZ, year: "numeric", month: "2-digit", day: "2-digit",
+  }).format(new Date(ms)); // en-CA → "YYYY-MM-DD"
+}
+// Offset (ms) da aggiungere a UTC per ottenere l'ora di parete a Roma in quell'istante.
+function romeOffsetMs(ms) {
+  const p = new Intl.DateTimeFormat("en-US", {
+    timeZone: ROME_TZ, hourCycle: "h23",
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit",
+  }).formatToParts(new Date(ms)).reduce((a, x) => ((a[x.type] = x.value), a), {});
+  return Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute, +p.second) - ms;
+}
+// Istante UTC (ms) della mezzanotte di Roma per la data YYYY-MM-DD (auto-correzione DST).
+function romeMidnight(dayStr) {
+  const guess = Date.parse(dayStr + "T00:00:00Z");
+  return guess - romeOffsetMs(guess - romeOffsetMs(guess));
+}
+// Data calendario precedente/successiva (aritmetica pura su YYYY-MM-DD, indip. dal fuso).
+function prevDay(s) { const [y, m, d] = s.split("-").map(Number); return new Date(Date.UTC(y, m - 1, d) - 86400000).toISOString().slice(0, 10); }
+function nextDay(s) { const [y, m, d] = s.split("-").map(Number); return new Date(Date.UTC(y, m - 1, d) + 86400000).toISOString().slice(0, 10); }
 
 async function recordHistory(env, s) {
   if (!env?.PDF_ARCHIVE) return;
-  const today = dayUTC(Date.now());
+  const today = dayRome();
   let hist = {};
   try { const o = await env.PDF_ARCHIVE.get(HISTORY_KEY); if (o) hist = JSON.parse(await o.text()) || {}; } catch {}
   let changed = false;
@@ -1020,7 +1045,7 @@ async function recordHistory(env, s) {
     if (next !== prev) { hist[k][today] = next; changed = true; }
   }
   // Potatura oltre i 90 giorni (confronto lessicografico su YYYY-MM-DD)
-  const cutoff = dayUTC(Date.now() - HISTORY_DAYS * 86400000);
+  const cutoff = dayRome(Date.now() - HISTORY_DAYS * 86400000);
   for (const k of HIST_COMPONENTS) {
     if (!hist[k]) continue;
     for (const d of Object.keys(hist[k])) if (d < cutoff && d !== "_updated") { delete hist[k][d]; changed = true; }
@@ -1058,8 +1083,10 @@ async function handleStatusHistory(env, ctx) {
   if (env?.PDF_ARCHIVE) {
     try { const o = await env.PDF_ARCHIVE.get(HISTORY_KEY); if (o) hist = JSON.parse(await o.text()) || {}; } catch {}
   }
+  // Sequenza di date CALENDARIO in ora di Roma (oldest→newest), robusta ai cambi DST
+  // (decremento per data, non per 24h fisse).
   const days = [];
-  for (let i = HISTORY_DAYS - 1; i >= 0; i--) days.push(dayUTC(Date.now() - i * 86400000));
+  { let d = dayRome(); const seq = [d]; for (let i = 1; i < HISTORY_DAYS; i++) { d = prevDay(d); seq.push(d); } days.push(...seq.reverse()); }
 
   const components = HIST_COMPONENTS.map((k) => {
     const hk = hist[k] || {};
@@ -1091,14 +1118,16 @@ const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
 function safeJsonParse(s) { try { return JSON.parse(s); } catch { return s; } }
 
 async function handleHealthLog(url, env) {
-  const day = url.searchParams.get("day") || dayUTC(Date.now());
+  const day = url.searchParams.get("day") || dayRome();
   if (!DAY_RE.test(day)) {
     return jsonResponse({ error: "Parametro 'day' non valido (atteso YYYY-MM-DD)" }, 400);
   }
   if (!env?.DB) return jsonResponse({ day, count: 0, events: [], note: "D1 non configurato" });
 
-  const start = Date.parse(day + "T00:00:00Z");
-  const end = start + 86400000;
+  // Giorno = data CALENDARIO in ora di Roma: finestra da mezzanotte di Roma alla
+  // mezzanotte di Roma successiva (gestisce l'offset CET/CEST, DST inclusa).
+  const start = romeMidnight(day);
+  const end = romeMidnight(nextDay(day));
   try {
     const { results } = await env.DB.prepare(
       `SELECT ts, status, latency, check_name, cause, detail
