@@ -667,10 +667,20 @@ async function verifyHmac(secret, message, sigBase64) {
 // (e aggiornabile) da chiunque su https://opentimestamps.org o col client ots.
 // Terza àncora indipendente accanto a firma HMAC e marca temporale TSA.
 
+// I quattro calendar pubblici di default del client OpenTimestamps. Più calendar =
+// più ridondanza: la prova è valida con UNA sola risposta (fail-open), quindi serve
+// che cadano TUTTI insieme perché un'attestazione resti senza àncora. La .ots con
+// più rami è regolare (più conferme indipendenti).
 const OTS_CALENDARS = [
   "https://alice.btc.calendar.opentimestamps.org",
   "https://bob.btc.calendar.opentimestamps.org",
+  "https://finney.calendar.opentimestamps.org",
+  "https://btc.calendar.catallaxy.com",
 ];
+
+// Timeout per la singola POST a un calendar in emissione: interrogati in parallelo,
+// così un calendar lento/appeso non blocca né rallenta l'emissione del certificato.
+const OTS_SUBMIT_TIMEOUT = 8000;
 
 // \x00OpenTimestamps\x00\x00Proof\x00\xbf\x89\xe2\xe8\x84\xe8\x92\x94
 const OTS_MAGIC = new Uint8Array([
@@ -709,17 +719,22 @@ async function createOtsProof(sha256hex) {
   const nonce  = crypto.getRandomValues(new Uint8Array(16));
   const m1 = new Uint8Array(await crypto.subtle.digest("SHA-256", concatBytes(digest, nonce)));
 
-  const responses = [];
-  for (const cal of OTS_CALENDARS) {
-    try {
-      const res = await fetch(`${cal}/digest`, {
-        method: "POST",
-        headers: { Accept: "application/vnd.opentimestamps.v1", "User-Agent": "imgauth-ots" },
-        body: m1,
-      });
-      if (res.ok) responses.push(new Uint8Array(await res.arrayBuffer()));
-    } catch { /* calendar irraggiungibile: si prosegue con gli altri */ }
-  }
+  // Interroga TUTTI i calendar in PARALLELO, ognuno con il proprio timeout: averne
+  // di più aumenta la ridondanza (basta una risposta) senza rallentare l'emissione,
+  // perché un calendar lento non blocca gli altri. L'ordine delle risposte non conta:
+  // ciascuna è un ramo indipendente dell'albero della prova.
+  const settled = await Promise.all(OTS_CALENDARS.map(async (cal) => {
+    const res = await fetchWithTimeout(`${cal}/digest`, OTS_SUBMIT_TIMEOUT, {
+      method: "POST",
+      headers: { Accept: "application/vnd.opentimestamps.v1", "User-Agent": "imgauth-ots" },
+      body: m1,
+    });
+    if (res && res.ok) {
+      try { return new Uint8Array(await res.arrayBuffer()); } catch { return null; }
+    }
+    return null;
+  }));
+  const responses = settled.filter(Boolean);
   if (responses.length === 0) return null;
 
   // DetachedTimestampFile: MAGIC + version + op sha256 (0x08) + digest, poi
@@ -1169,17 +1184,24 @@ async function runChecks(env) {
       cause: r ? `http_${r.status}` : "timeout", detail: r ? { http: r.status } : null });
   }
 
-  // Calendar OpenTimestamps: l'ancoraggio reale (ensureOtsProof) usa ENTRAMBI i
-  // calendar in fail-open, quindi basta che UNO risponda per dirsi "su"; se cadono
-  // TUTTI è "degraded" (informativo). Controllo in parallelo, timeout 6s. La latenza
-  // è il tempo totale del Promise.all (proxy del più lento a rispondere).
+  // Calendar OpenTimestamps: l'ancoraggio reale (ensureOtsProof) ha bisogno che
+  // UNO solo dei calendar risponda (fail-open). Misuriamo quindi il tempo del PRIMO
+  // a rispondere (Promise.any), non del più lento: così un singolo calendar lento non
+  // fa più apparire l'àncora "degradata" quando in realtà l'attestazione viene ancorata
+  // bene dagli altri. "degraded" (informativo) solo se cadono TUTTI. Timeout 6s ciascuno.
   {
     const t0 = Date.now();
-    const reach = await Promise.all(
-      OTS_CALENDARS.map((c) => fetchWithTimeout(c, 6000, { method: "GET" }))
-    );
+    let firstUp = false;
+    try {
+      await Promise.any(OTS_CALENDARS.map(async (c) => {
+        const r = await fetchWithTimeout(c, 6000, { method: "GET" });
+        if (r) return true;             // raggiungibile → soddisfa Promise.any
+        throw new Error("unreachable"); // non raggiungibile → rigetta
+      }));
+      firstUp = true;
+    } catch { firstUp = false; }       // tutti rigettati → AggregateError
     const latency = Date.now() - t0;
-    if (reach.some((r) => r)) samples.push(gradeSample("anchor", true, latency));
+    if (firstUp) samples.push(gradeSample("anchor", true, latency));
     else samples.push({ check: "anchor", up: false, status: "degraded", latency,
       cause: "all_unreachable", detail: null });
   }
