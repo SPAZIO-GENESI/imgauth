@@ -1,6 +1,25 @@
 name = "imgauth"
 main = "worker.js"
 compatibility_date = "2024-09-23"
+# Il custom domain imgauth.spaziogenesi.org è un CNAME proxato → imgauth.it-e3f.workers.dev:
+# dipende quindi dalla route workers.dev. Le versioni recenti di wrangler la disabilitano
+# se non dichiarata, mandando il dominio in 522. Tenere ESPLICITAMENTE abilitata.
+workers_dev = true
+
+# Pagina "certificato verificabile online" GET /c/<sha256> (handleCertPage).
+# La route qui sotto serve la pagina sull'URL canonico stampato nel certificato:
+# https://attestazione.spaziogenesi.org/c/<hash>. Intercetta SOLO /c/*; tutto il
+# resto del dominio continua ad andare a GitHub Pages (authweb).
+# Prerequisito già soddisfatto: il record attestazione.spaziogenesi.org è già PROXATO
+# da Cloudflare (verificato 2026-06-25). Il Worker risponde anche sul proprio custom
+# domain → https://imgauth.spaziogenesi.org/c/<hash>.
+# ⚠️ La chiave `routes` è DICHIARATIVA: il deploy imposta ESATTAMENTE questo elenco
+# e rimuove le route non listate. La prima riga è quella che serve l'intera API sul
+# custom domain del Worker: NON rimuoverla (senza, imgauth.spaziogenesi.org va in 522).
+routes = [
+  { pattern = "imgauth.spaziogenesi.org/*", zone_name = "spaziogenesi.org" },
+  { pattern = "attestazione.spaziogenesi.org/c/*", zone_name = "spaziogenesi.org" }
+]
 
 # Cron: campiona lo stato dei servizi e aggiorna il rollup giornaliero in R2
 # (status/history.json) per la pagina /status (barre 90 giorni). Ogni 30 minuti.

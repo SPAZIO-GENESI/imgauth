@@ -7,6 +7,8 @@
  *                         salva copia in R2 sotto pdf/<sha256>/ (binding PDF_ARCHIVE)
  *   GET  /api/cert      → recupero certificato smarrito: restituisce dal R2 il PDF
  *                         archiviato per ?hash=<sha256> (prima emissione)
+ *   GET  /c/<sha256>    → pagina pubblica "certificato verificabile online": impronta,
+ *                         data, algoritmo, ancoraggio OpenTimestamps, QR (HTML, no auth)
  *   GET  /api/badge     → badge SVG "Opera attestata" per ?hash=<sha256> (embed
  *                         su siti/social); verde solo se l'hash è in archivio
  *   GET  /api/status    → stato semaforico dei servizi (worker, archivio R2,
@@ -33,6 +35,15 @@ const MONTHS_IT = [
 ];
 
 const ALLOWED_ORIGIN = "https://attestazione.spaziogenesi.org";
+
+// Base pubblica della pagina "certificato verificabile online" (vedi handleCertPage)
+// e dominio su cui vivono gli endpoint /api/* (download PDF, prova .ots, badge).
+// La pagina /c/<sha256> è renderizzata dal Worker e va montata su
+// attestazione.spaziogenesi.org/c/* tramite route Cloudflare (vedi wrangler.toml);
+// finché la route non è attiva, la STESSA pagina è raggiungibile su
+// imgauth.spaziogenesi.org/c/<sha256> (custom domain del Worker, già attivo).
+const CERT_PAGE_BASE = "https://attestazione.spaziogenesi.org";
+const API_BASE       = "https://imgauth.spaziogenesi.org";
 
 // Limite dimensione opera: coerente con i 100 MB dichiarati dall'interfaccia.
 const MAX_BYTES = 100 * 1024 * 1024;
@@ -197,6 +208,7 @@ export default {
     if (method === "GET"  && path === "/api/status")   return withPublicCors(await handleStatus(env, ctx));
     if (method === "GET"  && path === "/api/status-history") return withPublicCors(await handleStatusHistory(env, ctx));
     if (method === "GET"  && path === "/api/health-log") return withPublicCors(await handleHealthLog(url, env));
+    if (method === "GET"  && path.startsWith("/c/"))   return handleCertPage(path, env);
 
     return jsonResponse({ error: "Endpoint non trovato", path }, 404);
   },
@@ -374,11 +386,15 @@ async function fillCertificatePdf(d, meta, otsUrl) {
   // ── QR code dinamico ────────────────────────────────────────────────────────
   // Copre il QR statico del template (Im0: x=438.1 y=673.7 79.4×79.4 pt)
   // e disegna il nuovo QR come rettangoli vettoriali con pdf-lib.
+  // Il QR apre la PAGINA di verifica permanente /c/<hash> (impronta, data,
+  // ancoraggio, QR, + pulsante "verifica col file"): superset della vecchia
+  // destinazione ?hash=, che resta nel link testuale del footer.
   const page = doc.getPages()[0];
-  const verifyUrl = `https://attestazione.spaziogenesi.org?hash=${d.sha256 ?? ""}`;
+  const verifyUrl  = `${CERT_PAGE_BASE}?hash=${d.sha256 ?? ""}`;
+  const certPageUrl = `${CERT_PAGE_BASE}/c/${d.sha256 ?? ""}`;
   const QR_X = 438.1, QR_Y = 666.0, QR_SIZE = 100;
 
-  const qr = encodeQR(verifyUrl, { ecc: "L" });
+  const qr = encodeQR(certPageUrl, { ecc: "L" });
   const mod = QR_SIZE / qr.size;
 
   // Quiet zone + copertura QR statico
@@ -484,6 +500,9 @@ async function fillCertificatePdf(d, meta, otsUrl) {
   blockY -= 1;
   if (d.hmac) drawWrapped(`Firma HMAC (server): ${String(d.hmac)}`, 6.5, grigio);
   drawWrapped(`Emesso da: ${String(d.emesso_da ?? "Spazio Genesi ETS — Attestazione Opere")} — Motore: imgauth v${APP_VERSION} — File: ${String(d.opera ?? "")}`, 6.5, grigio);
+  // Pagina permanente di verifica online: stessa impronta, consultabile da chiunque
+  // riceva il certificato (impronta, data, algoritmo, ancoraggio OTS, QR).
+  drawWrapped(`Certificato verificabile online: ${CERT_PAGE_BASE}/c/${d.sha256 ?? ""}`, 6.5, oro);
   if (otsUrl) {
     drawWrapped(`Ancoraggio blockchain (OpenTimestamps, Bitcoin): prova scaricabile da ${otsUrl} — verifica su https://opentimestamps.org`, 6.5, grigio);
   }
@@ -566,6 +585,13 @@ async function handlePdf(request, env, ctx) {
       await env.PDF_ARCHIVE.put(key, finalBytes, {
         httpMetadata: { contentType: "application/pdf" },
       });
+      // Sidecar JSON per la pagina pubblica /c/<hash> (handleCertPage): solo i dati
+      // già stampati e vincolati. Best-effort e idempotente — scritto SOLO alla
+      // prima emissione, così la pagina riflette la data più antica (coerente con
+      // /api/cert e la prova .ots). Un errore qui non compromette l'emissione.
+      if (ctx && typeof ctx.waitUntil === "function") {
+        ctx.waitUntil(writeCertMeta(env, sha256.toLowerCase(), d, meta));
+      }
     }
 
     // Notifica Telegram "nuovo certificato" (post-risposta, fail-safe): non blocca
@@ -783,6 +809,241 @@ async function handleCert(url, env) {
       ...corsHeaders(),
     },
   });
+}
+
+// ── /c/<sha256> — certificato verificabile online ────────────────────────────
+// Pagina pubblica e permanente per ogni opera attestata: impronta SHA-256, data,
+// algoritmo, ancoraggio OpenTimestamps (Bitcoin) e QR code. È renderizzata dal
+// Worker (HTML, HTTP 200) e va montata su attestazione.spaziogenesi.org/c/* via
+// route Cloudflare; nel frattempo risponde anche su imgauth.spaziogenesi.org/c/.
+// Stesso modello di fiducia di /api/cert: la pagina esiste solo se l'opera è in
+// archivio, ottenibile solo da chi conosce l'impronta (cioè possiede file/cert).
+
+// Sidecar di metadati per la pagina /c/<hash>: i soli campi già stampati sul
+// certificato. Idempotente: preserva la PRIMA emissione. Best-effort.
+async function writeCertMeta(env, hash, d, meta) {
+  const key = `meta/cert/${hash}.json`;
+  try {
+    if (await env.PDF_ARCHIVE.head(key)) return;
+    const payload = {
+      sha256: hash,
+      algoritmo: "SHA-256",
+      timestamp_iso: String(d.timestamp_iso ?? ""),
+      timestamp_leggibile: String(d.timestamp_leggibile ?? ""),
+      dimensione_bytes: d.dimensione_bytes ?? null,
+      tipo_mime: String(d.tipo_mime ?? ""),
+      opera: String(d.opera ?? ""),
+      titolo: meta?.titolo || "",
+      autore: meta?.autore || "",
+      anno: meta?.anno || "",
+      note: meta?.note || "",
+    };
+    await env.PDF_ARCHIVE.put(key, JSON.stringify(payload), {
+      httpMetadata: { contentType: "application/json; charset=utf-8" },
+    });
+  } catch { /* best-effort: la pagina ha un fallback sulla chiave del PDF */ }
+}
+
+// Ricostruisce l'ISO dell'emissione dal nome della chiave R2 (fallback per i
+// certificati senza sidecar): pdf/<hash>/certificato_<stamp>.pdf, dove lo stamp è
+// l'ISO con ":" e "." sostituiti da "-" (vedi certFilenameStamp).
+function stampFromKey(key) {
+  const m = String(key).match(/certificato_(.+)\.pdf$/);
+  if (!m) return "";
+  const s = m[1].replace(/T(\d{2})-(\d{2})-(\d{2})-(\d{3})Z$/, "T$1:$2:$3.$4Z");
+  const dt = new Date(s);
+  return isNaN(dt.getTime()) ? "" : dt.toISOString();
+}
+
+function escHtml(s) {
+  return String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
+function formatDateIT(iso) {
+  const dt = new Date(iso);
+  if (isNaN(dt.getTime())) return "";
+  const hh = String(dt.getUTCHours()).padStart(2, "0");
+  const mm = String(dt.getUTCMinutes()).padStart(2, "0");
+  return `${dt.getUTCDate()} ${MONTHS_IT[dt.getUTCMonth() + 1]} ${dt.getUTCFullYear()}, ore ${hh}:${mm} UTC`;
+}
+
+// QR come SVG vettoriale (nessuna dipendenza esterna): codifica l'URL passato.
+function qrSvg(text, px = 188) {
+  const qr = encodeQR(text, { ecc: "M" });
+  const n = qr.size;
+  let rects = "";
+  for (let r = 0; r < n; r++)
+    for (let c = 0; c < n; c++)
+      if (qr.data[r][c]) rects += `<rect x="${c}" y="${r}" width="1" height="1"/>`;
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${px}" height="${px}" viewBox="0 0 ${n} ${n}" shape-rendering="crispEdges" role="img" aria-label="QR del certificato"><rect width="${n}" height="${n}" fill="#fff"/><g fill="#1a1a1a">${rects}</g></svg>`;
+}
+
+function htmlResponse(html, status = 200) {
+  return new Response(html, {
+    status,
+    headers: {
+      "Content-Type": "text/html; charset=utf-8",
+      // Un certificato esistente è stabile → cache lunga; una pagina "non trovata"
+      // può diventare valida appena l'opera viene archiviata → cache breve.
+      "Cache-Control": status === 200 ? "public, max-age=3600" : "public, max-age=60",
+    },
+  });
+}
+
+async function handleCertPage(path, env) {
+  const hash = decodeURIComponent(path.slice(3).split("/")[0] || "").toLowerCase();
+  if (!HEX64.test(hash)) {
+    return htmlResponse(certPageShell("Impronta non valida",
+      `<p class="lead">L'indirizzo non contiene un'impronta SHA-256 valida (64 caratteri esadecimali).</p>`), 404);
+  }
+  if (!env?.PDF_ARCHIVE) {
+    return htmlResponse(certPageShell("Servizio non disponibile",
+      `<p class="lead">L'archivio dei certificati non è al momento raggiungibile. Riprova più tardi.</p>`), 503);
+  }
+
+  let hasCert = false, hasOts = false, metaObj = null, certIso = "";
+  try {
+    const listed = await env.PDF_ARCHIVE.list({ prefix: `pdf/${hash}/` });
+    const keys = (listed?.objects ?? []).map(o => o.key).sort();
+    hasCert = keys.length > 0;
+    if (hasCert) certIso = stampFromKey(keys[0]);
+    hasOts = !!(await env.PDF_ARCHIVE.head(`ots/${hash}.ots`));
+    const m = await env.PDF_ARCHIVE.get(`meta/cert/${hash}.json`);
+    if (m) metaObj = JSON.parse(await m.text());
+  } catch { /* fall through: trattato come non trovato */ }
+
+  if (!hasCert && !hasOts) {
+    return htmlResponse(certPageShell("Attestazione non trovata",
+      `<p class="lead">Nessuna attestazione risulta in archivio per questa impronta.</p>
+       <p class="muted">Se hai appena emesso il certificato, attendi qualche istante e ricarica. Per attestare una nuova opera vai su <a href="${CERT_PAGE_BASE}">attestazione.spaziogenesi.org</a>.</p>
+       <p class="fingerprint">${escHtml(hash)}</p>`), 404);
+  }
+
+  return htmlResponse(certPageHtml(hash, metaObj, certIso, hasCert, hasOts), 200);
+}
+
+// Guscio HTML comune (stessa identità visiva per pagina valida e stati d'errore).
+function certPageShell(title, bodyHtml, headExtra = "") {
+  return `<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${escHtml(title)} — Spazio Genesi</title>
+<meta name="robots" content="noindex">
+${headExtra}
+<style>
+  :root { --oro:#8B6914; --bg:#faf8f4; --card:#fff; --ink:#1f1d18; --muted:#6b6453; --line:#e7e1d4; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    line-height:1.6; padding:1.5rem; }
+  .wrap { max-width:640px; margin:1.5rem auto; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px;
+    padding:1.6rem 1.7rem; box-shadow:0 1px 3px rgba(0,0,0,.04); }
+  .brand { display:flex; align-items:center; gap:.55rem; font-size:.82rem;
+    letter-spacing:.04em; text-transform:uppercase; color:var(--muted); margin-bottom:1rem; }
+  .brand b { color:var(--oro); font-weight:700; letter-spacing:.02em; text-transform:none; font-size:.95rem; }
+  h1 { font-size:1.45rem; margin:.2rem 0 1rem; }
+  .lead { font-size:1.02rem; }
+  .muted { color:var(--muted); font-size:.9rem; }
+  a { color:var(--oro); }
+  .pill { display:inline-flex; align-items:center; gap:.4rem; font-size:.82rem; font-weight:600;
+    padding:.28rem .7rem; border-radius:999px; background:#eef6ec; color:#2f6b2a; border:1px solid #cfe6ca; }
+  .grid { margin:1.3rem 0; border-top:1px solid var(--line); }
+  .row { display:flex; flex-wrap:wrap; gap:.2rem .9rem; padding:.75rem 0; border-bottom:1px solid var(--line); }
+  .row .k { flex:0 0 9.5rem; color:var(--muted); font-size:.85rem; }
+  .row .v { flex:1 1 14rem; min-width:0; }
+  .fingerprint { font-family:ui-monospace,"SFMono-Regular",Menlo,Consolas,monospace;
+    font-size:.84rem; word-break:break-all; line-height:1.5; }
+  .qr { text-align:center; margin:1.4rem 0 .4rem; }
+  .qr svg { width:188px; height:188px; border:1px solid var(--line); border-radius:10px; padding:8px; background:#fff; }
+  .qr .cap { color:var(--muted); font-size:.8rem; margin-top:.5rem; }
+  .actions { display:flex; flex-wrap:wrap; gap:.6rem; margin-top:1.3rem; }
+  .btn { display:inline-flex; align-items:center; gap:.45rem; text-decoration:none; font-size:.9rem;
+    font-weight:600; padding:.6rem 1rem; border-radius:9px; border:1px solid var(--line); color:var(--ink); }
+  .btn.primary { background:var(--oro); color:#fff; border-color:var(--oro); }
+  .foot { margin-top:1.5rem; color:var(--muted); font-size:.78rem; line-height:1.6; }
+  .copy { cursor:pointer; border:none; background:none; color:var(--oro); font-size:.8rem; padding:0; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <div class="brand">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#8B6914" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-8 8.5-4.5-1-8-3.5-8-8.5V6l8-3 8 3z"/><path d="m9 12 2 2 4-4"/></svg>
+        <b>Spazio Genesi</b> · Attestazione opere
+      </div>
+      ${bodyHtml}
+      <div class="foot">
+        Spazio Genesi ETS — Codice fiscale 96602450585 — <a href="${CERT_PAGE_BASE}">attestazione.spaziogenesi.org</a><br>
+        L'attestazione prova l'esistenza e l'integrità del file a una certa data; non costituisce di per sé prova di paternità dell'opera.
+      </div>
+    </div>
+  </div>
+</body>
+</html>`;
+}
+
+function certPageHtml(hash, m, certIso, hasCert, hasOts) {
+  const permaUrl = `${CERT_PAGE_BASE}/c/${hash}`;
+  const dateIso  = (m && m.timestamp_iso) || certIso || "";
+  const dateText = (m && m.timestamp_leggibile) || formatDateIT(dateIso) || "data non disponibile";
+  const otsUrl   = `${API_BASE}/api/ots?hash=${hash}`;
+  const certUrl  = `${API_BASE}/api/cert?hash=${hash}`;
+  const verifyUrl = `${CERT_PAGE_BASE}?hash=${hash}`;
+
+  // Riga dati dichiarati (solo se presenti): sono auto-dichiarazioni vincolate alla firma.
+  const declared = [];
+  if (m?.titolo) declared.push(["Titolo", m.titolo]);
+  if (m?.autore) declared.push(["Autore", m.autore]);
+  if (m?.anno)   declared.push(["Anno/versione", m.anno]);
+  if (m?.note)   declared.push(["Note", m.note]);
+  const declaredRows = declared
+    .map(([k, v]) => `<div class="row"><span class="k">${escHtml(k)}</span><span class="v">${escHtml(v)}</span></div>`)
+    .join("");
+
+  const otsRow = hasOts
+    ? `<div class="row"><span class="k">Ancoraggio Bitcoin</span><span class="v">OpenTimestamps · <a href="${otsUrl}">scarica prova .ots</a> · <a href="https://opentimestamps.org" target="_blank" rel="noopener">verifica</a></span></div>`
+    : `<div class="row"><span class="k">Ancoraggio Bitcoin</span><span class="v muted">non disponibile per questa impronta</span></div>`;
+
+  const headExtra =
+    `<meta property="og:title" content="Certificato verificabile — Spazio Genesi">
+<meta property="og:description" content="Attestazione di esistenza e integrità di un'opera digitale. Impronta SHA-256, data, ancoraggio Bitcoin.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="${permaUrl}">
+<meta property="og:image" content="${CERT_PAGE_BASE}/og.png">
+<link rel="canonical" href="${permaUrl}">`;
+
+  const body = `
+      <span class="pill">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+        Opera attestata
+      </span>
+      <h1>Certificato verificabile</h1>
+      <p class="muted">Questa pagina certifica che il file con l'impronta qui sotto è stato attestato da Spazio Genesi ETS alla data indicata.</p>
+
+      <div class="grid">
+        <div class="row"><span class="k">Impronta (SHA-256)</span><span class="v fingerprint">${escHtml(hash)} <button class="copy" type="button" onclick="navigator.clipboard&&navigator.clipboard.writeText('${hash}').then(()=>{this.textContent='copiato'})">copia</button></span></div>
+        <div class="row"><span class="k">Algoritmo</span><span class="v">${escHtml((m && m.algoritmo) || "SHA-256")}</span></div>
+        <div class="row"><span class="k">Data attestazione</span><span class="v">${escHtml(dateText)}</span></div>
+        ${m?.tipo_mime ? `<div class="row"><span class="k">Tipo file</span><span class="v">${escHtml(m.tipo_mime)}</span></div>` : ""}
+        ${otsRow}
+        ${declaredRows ? `<div class="row" style="border:none;padding-bottom:.2rem"><span class="k" style="flex-basis:100%;color:var(--oro);font-weight:600">Dati dichiarati dall'autore</span></div>${declaredRows}` : ""}
+      </div>
+
+      <div class="qr">
+        ${qrSvg(permaUrl)}
+        <div class="cap">Inquadra per riaprire questa pagina</div>
+      </div>
+
+      <div class="actions">
+        ${hasCert ? `<a class="btn primary" href="${certUrl}">Scarica il certificato PDF</a>` : ""}
+        <a class="btn" href="${verifyUrl}">Verifica con il file originale</a>
+        ${hasOts ? `<a class="btn" href="${otsUrl}">Prova blockchain (.ots)</a>` : ""}
+      </div>`;
+
+  return certPageShell("Certificato verificabile", body, headExtra);
 }
 
 // ── /api/badge — badge SVG "Opera attestata" ─────────────────────────────────
