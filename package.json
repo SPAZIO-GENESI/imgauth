@@ -1,6 +1,6 @@
 {
   "name": "imgauth",
-  "version": "1.14.1",
+  "version": "1.15.0",
   "description": "AUTENTICATORE DI ORIGINALITA FOTOGRAFICA",
   "main": "worker.js",
   "scripts": {

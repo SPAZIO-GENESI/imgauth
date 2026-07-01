@@ -5,6 +5,10 @@ su cloudflare
 
 uso tramite https://attestazione.spaziogenesi.org/ (github pages)
 
+Dalla 1.15.0 il motore attesta un'impronta SHA-256 calcolata sul client
+(full privacy: il file non lascia il dispositivo dell'utente); il campo
+`image` (file inline base64) resta accettato per retrocompatibilità.
+
 ## Licenza
 
 Copyright (C) 2026 Spazio Genesi ETS.

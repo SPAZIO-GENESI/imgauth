@@ -1,8 +1,13 @@
 /**
  * Spazio Genesi ETS — Hash & Verify Worker (JavaScript)
  * Endpoints:
- *   POST /api/hash      → genera hash SHA-256 + attestazione + HMAC
- *   POST /api/verify    → verifica hash dichiarato vs file
+ *   POST /api/hash      → attesta un'impronta SHA-256: accetta `sha256` calcolato
+ *                         sul client (full privacy: il file non lascia il dispositivo)
+ *                         o, retrocompat, il file inline in `image` (base64);
+ *                         emette attestazione + HMAC
+ *   POST /api/verify    → verifica hash dichiarato vs file; il file è FACOLTATIVO
+ *                         (senza, verifica la sola firma HMAC: il confronto
+ *                         hash/file avviene sul client)
  *   POST /api/cert-pdf  → compila certificato_opera_pdf_mod.pdf e restituisce il PDF;
  *                         salva copia in R2 sotto pdf/<sha256>/ (binding PDF_ARCHIVE)
  *   GET  /api/cert      → recupero certificato smarrito: restituisce dal R2 il PDF
@@ -45,7 +50,10 @@ const ALLOWED_ORIGIN = "https://attestazione.spaziogenesi.org";
 const CERT_PAGE_BASE = "https://attestazione.spaziogenesi.org";
 const API_BASE       = "https://imgauth.spaziogenesi.org";
 
-// Limite dimensione opera: coerente con i 100 MB dichiarati dall'interfaccia.
+// Limite dimensione opera per il percorso LEGACY (file inline in `image`):
+// il percorso primario (1.15.0) riceve solo l'impronta `sha256` calcolata sul
+// client, quindi non ha tetto lato server (il limite pratico è la memoria del
+// browser che calcola il digest, dichiarato dall'interfaccia).
 const MAX_BYTES = 100 * 1024 * 1024;
 
 // Formati attesi per i campi vincolati crittograficamente (vedi handlePdf).
@@ -230,12 +238,15 @@ function handlePing(request) {
 
 async function handleHash(request, env) {
   try {
-    const data  = await request.json();
-    const b64   = data.image;
-    const name  = data.name  ?? "opera";
-    const mime  = data.type  ?? "application/octet-stream";
+    const data       = await request.json();
+    const b64        = data.image;   // percorso legacy: file inline (pre-1.15.0)
+    const clientHash = data.sha256;  // percorso primario: impronta calcolata sul client
+    const name       = data.name  ?? "opera";
+    const mime       = data.type  ?? "application/octet-stream";
 
-    if (!b64) return jsonResponse({ error: "Campo 'image' mancante." }, 400);
+    if (!b64 && !clientHash) {
+      return jsonResponse({ error: "Campo 'sha256' (o 'image') mancante." }, 400);
+    }
 
     // ── Anti-bot Turnstile ─────────────────────────────────────────────────────
     // La challenge è qui, all'emissione dell'attestazione: nessun token HMAC viene
@@ -258,22 +269,40 @@ async function handleHash(request, env) {
       }
     }
 
-    // Tetto di dimensione (difesa DoS/memoria): scarta payload oltre il limite
-    // prima ancora di decodificarlo. base64 ≈ 4/3 dei byte grezzi.
-    if (typeof b64 !== "string" || b64.length > Math.ceil(MAX_BYTES / 3) * 4 + 64) {
-      return jsonResponse({ error: "File troppo grande (max 100 MB)." }, 413);
-    }
+    let digest, size;
+    if (b64) {
+      // ── Percorso legacy: il file arriva inline, l'hash lo calcola il server ──
+      // Tetto di dimensione (difesa DoS/memoria): scarta payload oltre il limite
+      // prima ancora di decodificarlo. base64 ≈ 4/3 dei byte grezzi.
+      if (typeof b64 !== "string" || b64.length > Math.ceil(MAX_BYTES / 3) * 4 + 64) {
+        return jsonResponse({ error: "File troppo grande (max 100 MB)." }, 413);
+      }
 
-    // Decodifica base64 → ArrayBuffer
-    const raw = base64ToBytes(b64);
-    if (raw.byteLength > MAX_BYTES) {
-      return jsonResponse({ error: "File troppo grande (max 100 MB)." }, 413);
-    }
+      // Decodifica base64 → ArrayBuffer
+      const raw = base64ToBytes(b64);
+      if (raw.byteLength > MAX_BYTES) {
+        return jsonResponse({ error: "File troppo grande (max 100 MB)." }, 413);
+      }
 
-    // SHA-256
-    const hashBuf = await crypto.subtle.digest("SHA-256", raw);
-    const digest  = bufToHex(hashBuf);
-    const size    = raw.byteLength;
+      const hashBuf = await crypto.subtle.digest("SHA-256", raw);
+      digest = bufToHex(hashBuf);
+      size   = raw.byteLength;
+    } else {
+      // ── Percorso primario (1.15.0): impronta calcolata sul client ────────────
+      // Il file non lascia mai il dispositivo dell'utente. Il server attesta
+      // l'esistenza dell'impronta all'istante del SUO timestamp: la garanzia
+      // anti-retrodatazione resta intatta (timestamp + HMAC nascono qui).
+      // Ciò che il server smette di verificare è che l'impronta derivi da byte
+      // reali — irrilevante per la proof-of-existence: un'impronta inventata
+      // non è la preimmagine di nulla e produce un certificato inutilizzabile,
+      // mentre dimensione e MIME erano già campi descrittivi non vincolati.
+      digest = String(clientHash).trim().toLowerCase();
+      if (!HEX64.test(digest)) {
+        return jsonResponse({ error: "Campo 'sha256' malformato (attesi 64 caratteri esadecimali)." }, 400);
+      }
+      const declaredSize = Number(data.size);
+      size = Number.isFinite(declaredSize) && declaredSize >= 0 ? Math.floor(declaredSize) : null;
+    }
 
     // Timestamp UTC
     const now      = new Date();
@@ -321,13 +350,19 @@ async function handleVerify(request, env) {
     const attestazione = form.get("attestazione");
     const hmacClaimed  = form.get("hmac");
 
-    if (!file || !claimed) {
-      return jsonResponse({ error: "Richiesti 'image' e 'hash'." }, 400);
+    if (!claimed) {
+      return jsonResponse({ error: "Richiesto 'hash'." }, 400);
     }
 
-    const raw     = await file.arrayBuffer();
-    const hashBuf = await crypto.subtle.digest("SHA-256", raw);
-    const digest  = bufToHex(hashBuf);
+    // Il file è FACOLTATIVO (dalla 1.15.0): il client full-privacy confronta
+    // hash e file in locale e chiede qui solo la verifica della firma HMAC.
+    // Se il file c'è (client legacy/diretti), l'hash si ricalcola come prima.
+    let digest = null;
+    if (file && typeof file.arrayBuffer === "function") {
+      const raw     = await file.arrayBuffer();
+      const hashBuf = await crypto.subtle.digest("SHA-256", raw);
+      digest = bufToHex(hashBuf);
+    }
     const normalized = String(claimed).trim().toLowerCase();
 
     let hmac_valido = null;
@@ -347,8 +382,8 @@ async function handleVerify(request, env) {
 
     return jsonResponse({
       hash_dichiarato: normalized,
-      hash_calcolato:  digest,
-      coincide:        digest === normalized,
+      hash_calcolato:  digest,                              // null se il file non è stato inviato
+      coincide:        digest ? digest === normalized : null, // null = confronto fatto sul client
       hmac_valido,
     });
   } catch {
