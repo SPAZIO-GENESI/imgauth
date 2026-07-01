@@ -1195,6 +1195,35 @@ const HEALTH_DEGRADED = { archive: 1000, signer: 5000, anchor: 4000 };
 async function runChecks(env) {
   const samples = [];
 
+  // Capacità di emissione (sonda interna, 1.15.1): HMAC_SECRET presente e
+  // funzionante — round-trip firma+verifica su una stringa fissa (~1 ms).
+  // Confluisce nel componente `worker`: verde = "il motore sa firmare", non
+  // solo "risponde all'HTTP". Senza segreto le attestazioni uscirebbero prive
+  // di firma (hmac null) e /api/cert-pdf risponderebbe 503: è un guasto vero,
+  // e prima di questa sonda restava invisibile (status verde, monitor muto).
+  // NB: NON rileva una rotazione errata del segreto (firma e verifica
+  // userebbero lo stesso valore nuovo) — per quella serve il canary esterno
+  // su /api/verify (P17, monitor).
+  {
+    const t0 = Date.now();
+    if (!env?.HMAC_SECRET) {
+      samples.push({ check: "worker", up: false, status: "error", latency: 0,
+        cause: "hmac_secret_missing", detail: null });
+    } else {
+      try {
+        const probe = "status-probe";
+        const sig = await signHmac(env.HMAC_SECRET, probe);
+        const ok  = await verifyHmac(env.HMAC_SECRET, probe, sig);
+        if (ok) samples.push({ check: "worker", up: true, status: "ok", latency: Date.now() - t0, cause: null, detail: null });
+        else samples.push({ check: "worker", up: false, status: "error", latency: Date.now() - t0,
+          cause: "hmac_roundtrip_failed", detail: null });
+      } catch (e) {
+        samples.push({ check: "worker", up: false, status: "error", latency: Date.now() - t0,
+          cause: "hmac_error", detail: { message: String(e?.message || e).slice(0, 200) } });
+      }
+    }
+  }
+
   // Archivio R2: una list minima.
   if (env?.PDF_ARCHIVE) {
     const t0 = Date.now();
@@ -1258,7 +1287,7 @@ function gradeSample(check, up, latency) {
 // 'down' (archive/signer) o 'degraded' (anchor, fail-open).
 function summarizeStatus(samples) {
   const status = {
-    worker: "ok",          // se rispondiamo, il motore è su
+    worker: "ok",          // default "rispondiamo"; la sonda HMAC di runChecks lo porta a "down" se il motore non sa firmare
     archive: "n/d",
     signer: "n/d",
     anchor: "n/d",
