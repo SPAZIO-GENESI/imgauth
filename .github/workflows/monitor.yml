@@ -15,6 +15,20 @@
 #
 # Nota: i run schedulati di GitHub possono ritardare di qualche minuto e
 # vengono sospesi dopo 60 giorni di inattività del repo. Guardiano best-effort.
+#
+# Secondo job "canary": rileva una rotazione ERRATA di HMAC_SECRET, cosa che
+# la sonda interna di /api/status NON vede (quella rifà firma+verifica con il
+# segreto ATTUALE, quindi resta "coerente" anche se il segreto è stato
+# cambiato per errore). Serve un'attestazione nota, firmata una volta col
+# segreto corretto e conservata FUORI dal Worker, da ricontrollare nel tempo.
+# Richiede tre variabili di repo (Settings → Secrets and variables → Actions
+# → Variables — NON secrets: sono dati della stessa classe stampata su un
+# certificato, non compromettono nulla se esposti):
+#   CANARY_HASH           sha256 di un'opera di prova fissa
+#   CANARY_ATTESTAZIONE   stringa "SHA-256:<hash>@<timestamp_iso>" restituita da /api/hash
+#   CANARY_HMAC           firma hmac restituita dallo stesso /api/hash
+# Finché queste variabili non sono impostate, il job salta il controllo
+# (nessun falso allarme). Vedi CTL-hmac-canary nel registro pubblico gtf.
 
 name: Monitor /api/status
 
@@ -144,5 +158,96 @@ jobs:
               } else if (context.eventName === "workflow_dispatch") {
                 // Esecuzione manuale con tutto ok: messaggio di prova.
                 await telegram(messaggio("✅ Spazio Genesi — test monitor", statusObj));
+              }
+            }
+
+  canary:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Canary HMAC — rileva una rotazione errata del segreto
+        uses: actions/github-script@v7
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          CANARY_HASH: ${{ vars.CANARY_HASH }}
+          CANARY_ATTESTAZIONE: ${{ vars.CANARY_ATTESTAZIONE }}
+          CANARY_HMAC: ${{ vars.CANARY_HMAC }}
+        with:
+          script: |
+            const URL = "https://imgauth.spaziogenesi.org/api/verify";
+            const LABEL = "hmac-canary-alert";
+            const { owner, repo } = context.repo;
+
+            const HASH = process.env.CANARY_HASH;
+            const ATTESTAZIONE = process.env.CANARY_ATTESTAZIONE;
+            const HMAC = process.env.CANARY_HMAC;
+
+            if (!HASH || !ATTESTAZIONE || !HMAC) {
+              core.warning("Variabili canary non impostate (CANARY_HASH/CANARY_ATTESTAZIONE/CANARY_HMAC) — controllo saltato. Vedi CTL-hmac-canary nel registro pubblico gtf.");
+              return;
+            }
+
+            async function telegram(text) {
+              const token = process.env.TELEGRAM_BOT_TOKEN;
+              const chat = process.env.TELEGRAM_CHAT_ID;
+              if (!token || !chat) return;
+              try {
+                await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ chat_id: chat, text, disable_web_page_preview: true }),
+                });
+              } catch (e) { core.warning("Telegram fallito: " + e.message); }
+            }
+
+            let valid = false;
+            let detail = "n/d";
+            try {
+              const form = new FormData();
+              form.append("hash", HASH);
+              form.append("attestazione", ATTESTAZIONE);
+              form.append("hmac", HMAC);
+              const res = await fetch(URL, { method: "POST", body: form, signal: AbortSignal.timeout(15000) });
+              const json = await res.json();
+              detail = JSON.stringify(json);
+              valid = json.hmac_valido === true;
+            } catch (e) {
+              detail = `errore: ${e.message}`;
+            }
+
+            const open = await github.rest.issues.listForRepo({ owner, repo, state: "open", labels: LABEL, per_page: 1 });
+            const existing = open.data[0];
+            const now = new Date().toISOString();
+
+            if (!valid) {
+              const body = [
+                "Il canary HMAC (un'attestazione nota, firmata una volta col segreto corretto) NON verifica più.",
+                "",
+                "Questo NON viene rilevato dalla sonda interna di /api/status: quella rifà un round-trip firma+verifica col segreto ATTUALE, quindi resta 'coerente' anche se il segreto è stato ruotato per errore. Solo un valore firmato esternamente (questo canary) se ne accorge.",
+                "",
+                "Se HMAC_SECRET è stato toccato di recente, va ripristinato al valore originale (non ruotare mai di proposito: vedi CLAUDE.md e il caveau dei segreti).",
+                "",
+                "```json", detail, "```", "", `Controllo: ${now}`,
+              ].join("\n");
+              if (existing) {
+                await github.rest.issues.createComment({ owner, repo, issue_number: existing.number, body });
+              } else {
+                await github.rest.issues.create({
+                  owner, repo, title: "🔴 Canary HMAC: verifica fallita — possibile rotazione errata del segreto", body, labels: [LABEL],
+                });
+                await telegram(`🔴 Spazio Genesi — canary HMAC fallito\n\nPossibile rotazione errata di HMAC_SECRET.\n\nControllo: ${now}`);
+              }
+              core.setFailed("Canary HMAC non valido: " + detail);
+            } else {
+              console.log("Canary HMAC OK: " + detail);
+              if (existing) {
+                await github.rest.issues.createComment({
+                  owner, repo, issue_number: existing.number,
+                  body: `✅ Canary HMAC tornato valido.\n\n\`\`\`json\n${detail}\n\`\`\`\n\nControllo: ${now}`,
+                });
+                await github.rest.issues.update({ owner, repo, issue_number: existing.number, state: "closed" });
+                await telegram(`✅ Spazio Genesi — canary HMAC tornato valido\n\nControllo: ${now}`);
+              } else if (context.eventName === "workflow_dispatch") {
+                await telegram(`✅ Spazio Genesi — test canary HMAC ok\n\nControllo: ${now}`);
               }
             }
