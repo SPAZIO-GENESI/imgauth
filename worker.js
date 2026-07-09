@@ -60,6 +60,18 @@ const MAX_BYTES = 100 * 1024 * 1024;
 const HEX64  = /^[0-9a-f]{64}$/i;
 const ISO_TS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
 
+// ── Accesso agenti / device flow (P21) ──────────────────────────────────────
+// Parametri tarabili (vedi P21-DESIGN §6).
+const SESSION_QUOTA        = 20;                  // attestazioni totali per sessione (nessun reset)
+const SESSION_TTL_MS       = 24 * 60 * 60 * 1000;  // durata del session token
+const AUTH_CODE_TTL_MS     = 10 * 60 * 1000;       // validità del codice di autorizzazione device flow
+const AUTH_POLL_INTERVAL_S = 3;                    // intervallo di poll suggerito all'MCP
+const AGENT_403_ALERT_THRESHOLD = 10;               // avviso Telegram oltre N credenziali invalide/giorno
+// Sitekey PUBBLICA del widget Turnstile (stessa di authweb, stesso hostname:
+// attestazione.spaziogenesi.org). Non è un segreto: va nell'HTML servito.
+const AGENT_TURNSTILE_SITEKEY = "0x4AAAAAADiPceBIwTz5n4hG";
+const AUTH_CODE_RE = /^[0-9a-f]{16}$/i;
+
 // ── Helpers CORS ────────────────────────────────────────────────────────────
 
 function corsHeaders() {
@@ -183,6 +195,399 @@ function hmacMessage(attest, meta) {
   return attest + "\n" + META_FIELDS.map(([k]) => `${k}:${meta[k]}`).join("\n");
 }
 
+// ── Autenticazione agenti (bearer token D1-backed, P21) ─────────────────────
+// Formato: "sg_k_<id>_<secret>" (API key per convenzioni, quota mensile) o
+// "sg_s_<id>_<secret>" (session token da device flow, quota totale). In D1
+// sta SOLO sha256(secret): una credenziale valida sblocca solamente il
+// bypass del check Turnstile su /api/hash (vedi handleHash) — HMAC, timestamp
+// server e rate-limit per-IP restano invariati. Fail-closed: header presente
+// ma credenziale malformata/ignota/scaduta/senza quota → 403/429, mai un
+// fallback silenzioso al percorso Turnstile (vedi CLAUDE.md P21 § invarianti).
+const BEARER_RE = /^sg_(k|s)_([0-9a-f]{8,32})_([A-Za-z0-9_-]{16,64})$/;
+
+async function sha256Hex(s) {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s));
+  return bufToHex(buf);
+}
+
+// Confronto a tempo costante fra due hex string della stessa lunghezza attesa:
+// evita che un timing attack riveli byte dell'hash del secret un carattere alla volta.
+function timingSafeEqualHex(a, b) {
+  if (typeof a !== "string" || typeof b !== "string" || a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
+// N byte casuali crittograficamente sicuri, in esadecimale.
+function randomHex(bytes) {
+  const buf = new Uint8Array(bytes);
+  crypto.getRandomValues(buf);
+  return bufToHex(buf.buffer);
+}
+
+// N byte casuali in base64url (senza padding): alfabeto del secret delle credenziali.
+function randomBase64Url(bytes) {
+  const buf = new Uint8Array(bytes);
+  crypto.getRandomValues(buf);
+  let bin = "";
+  for (const b of buf) bin += String.fromCharCode(b);
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+// Invio Telegram best-effort (fail-safe: un errore qui non deve mai propagarsi).
+// Usato dagli allarmi P21 §2.5; notifyCertProduced ha il proprio invio inline
+// (comportamento pre-esistente, non toccato).
+async function sendTelegram(env, text) {
+  const token = env?.TELEGRAM_BOT_TOKEN, chat = env?.TELEGRAM_CHAT_ID;
+  if (!token || !chat) return;
+  try {
+    await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: chat, text, disable_web_page_preview: true }),
+    });
+  } catch { /* notifica best-effort */ }
+}
+
+// Contatore giornaliero (R2, come meta/cert-count) dei 403 su credenziali agente:
+// oltre soglia, un solo avviso Telegram per giorno (non uno per tentativo).
+async function recordAgent403(env) {
+  if (!env?.PDF_ARCHIVE) return;
+  const today = new Date().toISOString().slice(0, 10); // 'YYYY-MM-DD' UTC
+  let state = { day: today, count: 0 };
+  try {
+    const obj = await env.PDF_ARCHIVE.get("meta/agent-403-count");
+    if (obj) {
+      const parsed = JSON.parse(await obj.text());
+      if (parsed?.day === today) state = parsed;
+    }
+  } catch { /* contatore assente o illeggibile: si riparte da 0 */ }
+  state.count += 1;
+  state.day = today;
+  try { await env.PDF_ARCHIVE.put("meta/agent-403-count", JSON.stringify(state)); } catch {}
+
+  if (state.count === AGENT_403_ALERT_THRESHOLD + 1) {
+    await sendTelegram(env,
+      `⚠️ Spazio Genesi — più di ${AGENT_403_ALERT_THRESHOLD} credenziali agente non valide oggi (${state.count}). Possibile tentativo di abuso su /api/hash.`);
+  }
+}
+
+// Notifica soglia quota (80%/100%) di una credenziale agente. Chiamata solo
+// esattamente al momento del sorpasso (vedi authenticateAgent): non serve
+// stato aggiuntivo per evitare ripetizioni nello stesso periodo.
+async function notifyAgentQuota(env, id, kind, label, used, quota, pct) {
+  await sendTelegram(env,
+    `📊 Spazio Genesi — credenziale agente "${label || id}" (${kind}) al ${pct}% della quota (${used}/${quota}).`);
+}
+
+// Esito 403 di authenticateAgent: registra il tentativo (best-effort, non
+// bloccante) e restituisce l'errore da rispondere al chiamante.
+function rejectAgent(env, ctx, message) {
+  if (ctx && typeof ctx.waitUntil === "function") {
+    ctx.waitUntil(recordAgent403(env).catch(() => {}));
+  }
+  return { error: message, status: 403 };
+}
+
+// Verifica il bearer di `request` contro `agent_credentials`. Ritorna:
+//  - null                → nessun header Authorization: percorso Turnstile invariato
+//  - { error, status }   → credenziale presente ma respinta (403 invalida/scaduta/
+//                           revocata, 429 quota esaurita)
+//  - { ok: true }        → credenziale valida, quota già scalata (UPDATE atomico)
+async function authenticateAgent(request, env, ctx) {
+  const auth = request.headers.get("Authorization") || "";
+  if (!auth.startsWith("Bearer ")) return null;
+  const token = auth.slice("Bearer ".length).trim();
+
+  const m = BEARER_RE.exec(token);
+  if (!m || !env?.DB) return rejectAgent(env, ctx, "Credenziale non valida.");
+  const [, kindLetter, id, secret] = m;
+  const kind = kindLetter === "k" ? "key" : "session";
+
+  let row;
+  try {
+    row = await env.DB.prepare(
+      `SELECT id, kind, secret_hash, label, quota, used, period, expires_at, revoked
+       FROM agent_credentials WHERE id = ?`
+    ).bind(id).first();
+  } catch {
+    return rejectAgent(env, ctx, "Errore interno di autenticazione.");
+  }
+  if (!row || row.kind !== kind || row.revoked) {
+    return rejectAgent(env, ctx, "Credenziale non valida.");
+  }
+  if (kind === "session" && row.expires_at != null && Date.now() > row.expires_at) {
+    return rejectAgent(env, ctx, "Credenziale scaduta.");
+  }
+
+  const secretHash = await sha256Hex(secret);
+  if (!timingSafeEqualHex(secretHash, row.secret_hash)) {
+    return rejectAgent(env, ctx, "Credenziale non valida.");
+  }
+
+  // Quota: le 'key' si resettano al cambio di mese UTC; le 'session' hanno un
+  // tetto totale fisso per tutta la durata del token (nessun reset).
+  let used = row.used;
+  if (kind === "key") {
+    const currentPeriod = new Date().toISOString().slice(0, 7); // 'YYYY-MM'
+    if (row.period !== currentPeriod) {
+      used = 0;
+      try {
+        await env.DB.prepare(
+          `UPDATE agent_credentials SET used = 0, period = ? WHERE id = ?`
+        ).bind(currentPeriod, id).run();
+      } catch {
+        return rejectAgent(env, ctx, "Errore interno di autenticazione.");
+      }
+    }
+  }
+  if (used >= row.quota) {
+    return { error: "Quota della credenziale esaurita.", status: 429 };
+  }
+
+  try {
+    await env.DB.prepare(`UPDATE agent_credentials SET used = used + 1 WHERE id = ?`).bind(id).run();
+  } catch {
+    return rejectAgent(env, ctx, "Errore interno di autenticazione.");
+  }
+
+  // Allarme soglia quota (80%/100%, una volta sola: scatta solo esattamente al
+  // sorpasso). Priorità al 100% per non doppio-notificare sulle quote piccole
+  // dove le due soglie coincidono.
+  const newUsed = used + 1;
+  if (ctx && typeof ctx.waitUntil === "function") {
+    if (newUsed === row.quota) {
+      ctx.waitUntil(notifyAgentQuota(env, id, kind, row.label, newUsed, row.quota, 100).catch(() => {}));
+    } else if (newUsed === Math.ceil(row.quota * 0.8)) {
+      ctx.waitUntil(notifyAgentQuota(env, id, kind, row.label, newUsed, row.quota, 80).catch(() => {}));
+    }
+  }
+
+  return { ok: true };
+}
+
+// ── Device flow (autorizzazione umana una-tantum per MCP, P21) ──────────────
+// L'umano autorizza UNA volta nel browser (Turnstile, su questo Worker); l'MCP
+// polla finché non riceve il session token, consegnato una sola volta.
+
+// POST /api/agent/authorize — crea una richiesta di autorizzazione (no auth).
+async function handleAgentAuthorize(env) {
+  if (!env?.DB) return jsonResponse({ error: "Servizio non disponibile." }, 503);
+  const code = randomHex(8); // 16 caratteri esadecimali
+  const now = Date.now();
+  const expiresAt = now + AUTH_CODE_TTL_MS;
+  try {
+    await env.DB.prepare(
+      `INSERT INTO agent_authorizations (code, status, token_once, credential_id, created_at, expires_at)
+       VALUES (?, 'pending', NULL, NULL, ?, ?)`
+    ).bind(code, now, expiresAt).run();
+  } catch {
+    return jsonResponse({ error: "Errore interno." }, 500);
+  }
+  return jsonResponse({
+    code,
+    verification_url: `${CERT_PAGE_BASE}/agent/authorize?code=${code}`,
+    expires_in: Math.floor(AUTH_CODE_TTL_MS / 1000),
+    interval: AUTH_POLL_INTERVAL_S,
+  });
+}
+
+// GET /agent/authorize?code= — pagina servita dal Worker (stesso pattern di /c/*).
+async function handleAgentAuthorizePage(url, env) {
+  const code = url.searchParams.get("code") || "";
+  if (!AUTH_CODE_RE.test(code)) {
+    return htmlResponse(certPageShell("Codice non valido",
+      `<p class="lead">Il codice di autorizzazione non è valido o è incompleto.</p>`), 400);
+  }
+  if (!env?.DB) {
+    return htmlResponse(certPageShell("Servizio non disponibile",
+      `<p class="lead">Il servizio di autorizzazione non è al momento raggiungibile. Riprova più tardi.</p>`), 503);
+  }
+
+  let row;
+  try {
+    row = await env.DB.prepare(`SELECT status, expires_at FROM agent_authorizations WHERE code = ?`).bind(code).first();
+  } catch {
+    return htmlResponse(certPageShell("Errore", `<p class="lead">Errore interno. Riprova.</p>`), 500);
+  }
+  if (!row || (Date.now() > row.expires_at && row.status !== "claimed")) {
+    return htmlResponse(certPageShell("Richiesta scaduta",
+      `<p class="lead">Questa richiesta di autorizzazione non è più valida. Torna all'app che l'ha generata e riprova da capo.</p>`), 410);
+  }
+  if (row.status !== "pending") {
+    return htmlResponse(certPageShell("Autorizzato", agentAuthorizeSuccessBody()), 200);
+  }
+  return htmlResponse(agentAuthorizePageHtml(code), 200);
+}
+
+function agentAuthorizeSuccessBody() {
+  return `<h1>Autorizzato ✓</h1>
+    <p class="lead">Fatto. Torna all'app o all'agente che ha aperto questa pagina: rileverà l'autorizzazione da solo entro pochi secondi.</p>
+    <p class="muted">Puoi chiudere questa scheda.</p>`;
+}
+
+function agentAuthorizePageHtml(code) {
+  const bodyHtml = `<div id="agentBody">
+    <h1>Autorizza un'app a emettere attestazioni</h1>
+    <p class="lead">Un'app o un agente sul tuo dispositivo sta chiedendo di poter emettere fino a
+    <b>${SESSION_QUOTA} attestazioni</b> nelle prossime <b>24 ore</b>, senza dover risolvere una
+    verifica anti-bot a ogni attestazione.</p>
+    <p class="muted">Autorizza solo se hai avviato tu questa richiesta, da un'app o un agente di cui ti fidi.</p>
+    <div id="turnstileWidget" style="margin:1.2rem 0;"></div>
+    <p id="agentMsg" class="muted" role="status" aria-live="polite"></p>
+    <div class="actions">
+      <button id="agentApproveBtn" class="btn primary" type="button" disabled>Autorizza</button>
+    </div>
+  </div>
+  <script src="https://challenges.cloudflare.com/turnstile/v0/api.js?onload=onloadTurnstileCallback" async defer></script>
+  <script>
+    (function () {
+      var CODE = ${JSON.stringify(code)};
+      var SITEKEY = ${JSON.stringify(AGENT_TURNSTILE_SITEKEY)};
+      var tsToken = "";
+      window.onloadTurnstileCallback = function () {
+        if (!window.turnstile) return;
+        window.turnstile.render("#turnstileWidget", {
+          sitekey: SITEKEY,
+          action: "agent-authorize",
+          callback: function (token) {
+            tsToken = token;
+            document.getElementById("agentApproveBtn").disabled = false;
+          },
+        });
+      };
+      document.getElementById("agentApproveBtn").addEventListener("click", async function () {
+        var btn = this, msg = document.getElementById("agentMsg");
+        btn.disabled = true;
+        msg.textContent = "Autorizzazione in corso…";
+        try {
+          var res = await fetch("/api/agent/approve", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ code: CODE, turnstile_token: tsToken }),
+          });
+          if (!res.ok) throw new Error("http " + res.status);
+          document.getElementById("agentBody").innerHTML = ${JSON.stringify(agentAuthorizeSuccessBody())};
+        } catch (e) {
+          msg.textContent = "Autorizzazione non riuscita. Riprova.";
+          btn.disabled = false;
+          if (window.turnstile) window.turnstile.reset();
+        }
+      });
+    })();
+  </script>`;
+  return certPageShell("Autorizza un'app", bodyHtml);
+}
+
+// POST /api/agent/approve {code, turnstile_token} — genera il session token.
+async function handleAgentApprove(request, env, ctx) {
+  if (!env?.DB) return jsonResponse({ error: "Servizio non disponibile." }, 503);
+  let body;
+  try { body = await request.json(); } catch { return jsonResponse({ error: "Corpo non valido." }, 400); }
+  const code = String(body?.code || "");
+  const tsToken = String(body?.turnstile_token || "");
+  if (!AUTH_CODE_RE.test(code)) return jsonResponse({ error: "Codice non valido." }, 400);
+  if (!tsToken) return jsonResponse({ error: "Verifica anti-bot mancante." }, 400);
+
+  let row;
+  try {
+    row = await env.DB.prepare(`SELECT status, expires_at FROM agent_authorizations WHERE code = ?`).bind(code).first();
+  } catch {
+    return jsonResponse({ error: "Errore interno." }, 500);
+  }
+  if (!row || Date.now() > row.expires_at) return jsonResponse({ error: "Richiesta scaduta." }, 410);
+  if (row.status !== "pending") return jsonResponse({ error: "Richiesta già gestita." }, 409);
+
+  // Stessa policy fail-open di /api/hash: un siteverify irraggiungibile non deve
+  // bloccare l'unico punto umano dell'intero flusso agenti.
+  let human = true;
+  if (env?.TURNSTILE_SECRET) {
+    try {
+      human = await verifyTurnstile(env.TURNSTILE_SECRET, tsToken, request.headers.get("CF-Connecting-IP") || undefined);
+    } catch {
+      human = true;
+    }
+  }
+  if (!human) return jsonResponse({ error: "Verifica anti-bot non superata. Riprova." }, 403);
+
+  const id          = randomHex(4); // 8 caratteri esadecimali
+  const secret      = randomBase64Url(32);
+  const sessionToken = `sg_s_${id}_${secret}`;
+  const secretHash  = await sha256Hex(secret);
+  const now         = Date.now();
+  const expiresAt   = now + SESSION_TTL_MS;
+  const createdAt   = new Date(now).toISOString();
+
+  try {
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO agent_credentials (id, kind, secret_hash, label, quota, used, period, expires_at, revoked, created_at)
+         VALUES (?, 'session', ?, 'session', ?, 0, NULL, ?, 0, ?)`
+      ).bind(id, secretHash, SESSION_QUOTA, expiresAt, createdAt),
+      env.DB.prepare(
+        `UPDATE agent_authorizations SET status = 'approved', token_once = ?, credential_id = ? WHERE code = ?`
+      ).bind(sessionToken, id, code),
+    ]);
+  } catch {
+    return jsonResponse({ error: "Errore interno." }, 500);
+  }
+
+  if (ctx && typeof ctx.waitUntil === "function") {
+    ctx.waitUntil(sendTelegram(env,
+      `🔑 Spazio Genesi — nuova sessione agente autorizzata (device flow). Quota ${SESSION_QUOTA} attestazioni, scade tra 24h.`
+    ).catch(() => {}));
+  }
+
+  return jsonResponse({ ok: true });
+}
+
+// GET /api/agent/token?code= — polling dell'MCP: consegna il token una sola volta.
+async function handleAgentToken(url, env) {
+  const code = url.searchParams.get("code") || "";
+  if (!AUTH_CODE_RE.test(code)) return jsonResponse({ error: "Codice non valido." }, 400);
+  if (!env?.DB) return jsonResponse({ error: "Servizio non disponibile." }, 503);
+
+  let row;
+  try {
+    row = await env.DB.prepare(
+      `SELECT status, token_once, expires_at FROM agent_authorizations WHERE code = ?`
+    ).bind(code).first();
+  } catch {
+    return jsonResponse({ error: "Errore interno." }, 500);
+  }
+  if (!row) return jsonResponse({ status: "expired" }, 410);
+  if (row.status === "claimed") return jsonResponse({ status: "claimed" });
+  if (Date.now() > row.expires_at) return jsonResponse({ status: "expired" }, 410);
+  if (row.status === "pending") return jsonResponse({ status: "pending" });
+
+  // status === 'approved': consegna una sola volta, poi il token in chiaro
+  // sparisce da D1 (vedi schema § token_once).
+  try {
+    await env.DB.prepare(
+      `UPDATE agent_authorizations SET status = 'claimed', token_once = NULL WHERE code = ?`
+    ).bind(code).run();
+  } catch {
+    return jsonResponse({ error: "Errore interno." }, 500);
+  }
+  return jsonResponse({ status: "approved", token: row.token_once });
+}
+
+// Spazzino righe scadute (device flow), agganciato al cron esistente: righe di
+// autorizzazione scadute e session token scaduti (le 'key' non scadono mai).
+async function sweepExpiredAgentRows(env) {
+  if (!env?.DB) return;
+  const now = Date.now();
+  try {
+    await env.DB.batch([
+      env.DB.prepare(`DELETE FROM agent_authorizations WHERE expires_at < ?`).bind(now),
+      env.DB.prepare(`DELETE FROM agent_credentials WHERE kind = 'session' AND expires_at IS NOT NULL AND expires_at < ?`).bind(now),
+    ]);
+  } catch (e) {
+    console.error("[agent sweep failed]", e?.message);
+  }
+}
+
 // ── Entry point ──────────────────────────────────────────────────────────────
 
 export default {
@@ -200,14 +605,14 @@ export default {
     const ip = request.headers.get("CF-Connecting-IP") || "unknown";
     if (method === "POST" && path === "/api/cert-pdf") {
       if (await isRateLimited(env.RL_CERT, ip)) return tooManyResponse();
-    } else if (method === "POST" && (path === "/api/hash" || path === "/api/verify")) {
+    } else if (method === "POST" && (path === "/api/hash" || path === "/api/verify" || path === "/api/agent/authorize" || path === "/api/agent/approve")) {
       if (await isRateLimited(env.RL_API, ip)) return tooManyResponse();
-    } else if (method === "GET" && (path === "/api/ots" || path === "/api/cert" || path === "/api/badge")) {
+    } else if (method === "GET" && (path === "/api/ots" || path === "/api/cert" || path === "/api/badge" || path === "/api/agent/token")) {
       if (await isRateLimited(env.RL_API, ip)) return tooManyResponse();
     }
 
     if (method === "GET"  && path === "/ping")        return handlePing(request);
-    if (method === "POST" && path === "/api/hash")     return handleHash(request, env);
+    if (method === "POST" && path === "/api/hash")     return handleHash(request, env, ctx);
     if (method === "POST" && path === "/api/verify")   return handleVerify(request, env);
     if (method === "POST" && path === "/api/cert-pdf") return handlePdf(request, env, ctx);
     if (method === "GET"  && path === "/api/ots")      return handleOts(url, env);
@@ -217,14 +622,20 @@ export default {
     if (method === "GET"  && path === "/api/status-history") return withPublicCors(await handleStatusHistory(env, ctx));
     if (method === "GET"  && path === "/api/health-log") return withPublicCors(await handleHealthLog(url, env));
     if (method === "GET"  && path.startsWith("/c/"))   return handleCertPage(path, env);
+    if (method === "POST" && path === "/api/agent/authorize") return handleAgentAuthorize(env);
+    if (method === "POST" && path === "/api/agent/approve")   return handleAgentApprove(request, env, ctx);
+    if (method === "GET"  && path === "/api/agent/token")     return handleAgentToken(url, env);
+    if (method === "GET"  && path === "/agent/authorize")     return handleAgentAuthorizePage(url, env);
 
     return jsonResponse({ error: "Endpoint non trovato", path }, 404);
   },
 
   // Cron trigger (vedi wrangler.toml › [triggers]): campiona lo stato e aggiorna
-  // il rollup giornaliero in R2, così la pagina /status ha dati anche senza visite.
+  // il rollup giornaliero in R2, così la pagina /status ha dati anche senza visite;
+  // spazza anche le righe scadute del device flow agenti (P21).
   async scheduled(event, env, ctx) {
     ctx.waitUntil(sampleAndRecord(env).catch(() => {}));
+    ctx.waitUntil(sweepExpiredAgentRows(env).catch(() => {}));
   },
 };
 
@@ -236,7 +647,7 @@ function handlePing(request) {
 
 // ── /api/hash ────────────────────────────────────────────────────────────────
 
-async function handleHash(request, env) {
+async function handleHash(request, env, ctx) {
   try {
     const data       = await request.json();
     const b64        = data.image;   // percorso legacy: file inline (pre-1.15.0)
@@ -248,12 +659,30 @@ async function handleHash(request, env) {
       return jsonResponse({ error: "Campo 'sha256' (o 'image') mancante." }, 400);
     }
 
+    // Pre-check economico del formato (percorso client): un hash malformato non
+    // deve costare una challenge Turnstile né, dalla P21, una quota agente —
+    // il ricalcolo pieno più sotto resta invariato. Il percorso legacy (`image`)
+    // non è toccato: il decode+hash costoso resta dopo Turnstile, come prima.
+    if (!b64 && !HEX64.test(String(clientHash).trim())) {
+      return jsonResponse({ error: "Campo 'sha256' malformato (attesi 64 caratteri esadecimali)." }, 400);
+    }
+
+    // ── Autenticazione agenti (bearer, opzionale — vedi P21) ────────────────
+    // Una credenziale valida bypassa SOLO la challenge Turnstile qui sotto:
+    // timestamp server, HMAC e rate-limit per-IP restano invariati. Nessun
+    // header → percorso Turnstile identico a prima (agentAuth resta null).
+    const agentAuth = await authenticateAgent(request, env, ctx);
+    if (agentAuth && agentAuth.error) {
+      return jsonResponse({ error: agentAuth.error }, agentAuth.status);
+    }
+
     // ── Anti-bot Turnstile ─────────────────────────────────────────────────────
     // La challenge è qui, all'emissione dell'attestazione: nessun token HMAC viene
-    // rilasciato (né per il .txt né per il PDF) senza un umano verificato.
+    // rilasciato (né per il .txt né per il PDF) senza un umano verificato — o,
+    // dalla P21, senza una credenziale agente valida (agentAuth.ok).
     // Fail-open se siteverify è irraggiungibile: è l'endpoint primario e un
     // disservizio Turnstile non deve impedire il calcolo dell'hash.
-    if (env?.TURNSTILE_SECRET) {
+    if (!agentAuth && env?.TURNSTILE_SECRET) {
       const tsToken = String(data.turnstile_token ?? "");
       if (!tsToken) {
         return jsonResponse({ error: "Verifica anti-bot mancante." }, 400);
