@@ -77,8 +77,8 @@ const AUTH_CODE_RE = /^[0-9a-f]{16}$/i;
 function corsHeaders() {
   return {
     "Access-Control-Allow-Origin": ALLOWED_ORIGIN,
-    "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type",
+    "Access-Control-Allow-Methods": "POST, GET, PATCH, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, X-Admin-Secret",
     "Access-Control-Max-Age": "86400",
   };
 }
@@ -588,6 +588,317 @@ async function sweepExpiredAgentRows(env) {
   }
 }
 
+// ── Pannello admin credenziali agente (P21 follow-up) ───────────────────────
+// STOPGAP: protetto da un secret condiviso (env.ADMIN_SECRET, header
+// X-Admin-Secret) — stesso pattern di X-Sign-Secret tra imgauth e authart.
+// Da sostituire/affiancare con Cloudflare Access (Zero Trust) davanti a
+// /admin/* appena configurato dalla dashboard (fuori dalla portata di un
+// deploy: richiede permessi che questo Worker non ha). Il perimetro di
+// azione è identico a scripts/issue-agent-key.mjs — solo esposto via HTTP
+// invece che da CLI locale: crea/elenca/revoca/modifica quota di
+// agent_credentials, MAI l'emissione di certificati (che resta governata
+// solo da HMAC_SECRET, invariato).
+async function verifyAdminSecret(request, env) {
+  if (!env?.ADMIN_SECRET) return false;
+  const header = request.headers.get("X-Admin-Secret") || "";
+  if (!header) return false;
+  const [a, b] = await Promise.all([sha256Hex(header), sha256Hex(env.ADMIN_SECRET)]);
+  return timingSafeEqualHex(a, b);
+}
+
+function adminUnauthorized() {
+  return jsonResponse({ error: "Non autorizzato." }, 403);
+}
+
+async function handleAdminKeysList(env) {
+  if (!env?.DB) return jsonResponse({ error: "Servizio non disponibile." }, 503);
+  try {
+    const { results } = await env.DB.prepare(
+      `SELECT id, kind, label, quota, used, period, expires_at, revoked, created_at
+       FROM agent_credentials ORDER BY created_at DESC`
+    ).all();
+    return jsonResponse({ keys: results || [] });
+  } catch {
+    return jsonResponse({ error: "Errore interno." }, 500);
+  }
+}
+
+async function handleAdminKeysIssue(request, env) {
+  if (!env?.DB) return jsonResponse({ error: "Servizio non disponibile." }, 503);
+  let body;
+  try { body = await request.json(); } catch { return jsonResponse({ error: "Corpo non valido." }, 400); }
+  const label = String(body?.label ?? "").trim().slice(0, 200);
+  const quota = Number(body?.quota);
+  if (!label) return jsonResponse({ error: "Etichetta mancante." }, 400);
+  if (!Number.isInteger(quota) || quota <= 0) return jsonResponse({ error: "Quota non valida." }, 400);
+
+  const id = randomHex(4); // 8 caratteri esadecimali
+  const secret = randomBase64Url(32);
+  const key = `sg_k_${id}_${secret}`;
+  const secretHash = await sha256Hex(secret);
+  const createdAt = new Date().toISOString();
+  const period = createdAt.slice(0, 7); // 'YYYY-MM'
+
+  try {
+    await env.DB.prepare(
+      `INSERT INTO agent_credentials (id, kind, secret_hash, label, quota, used, period, expires_at, revoked, created_at)
+       VALUES (?, 'key', ?, ?, ?, 0, ?, NULL, 0, ?)`
+    ).bind(id, secretHash, label, quota, period, createdAt).run();
+  } catch {
+    return jsonResponse({ error: "Errore interno." }, 500);
+  }
+  // La chiave in chiaro esiste solo in questa risposta: non viene mai
+  // salvata (in D1 sta solo secretHash), quindi non è recuperabile dopo.
+  return jsonResponse({ id, key, label, quota }, 201);
+}
+
+async function handleAdminKeysUpdate(request, env, id) {
+  if (!env?.DB) return jsonResponse({ error: "Servizio non disponibile." }, 503);
+  if (!/^[0-9a-f]{8}$/i.test(id)) return jsonResponse({ error: "id non valido." }, 400);
+  let body;
+  try { body = await request.json(); } catch { return jsonResponse({ error: "Corpo non valido." }, 400); }
+
+  const sets = [], binds = [];
+  if (typeof body?.revoked === "boolean") {
+    sets.push("revoked = ?");
+    binds.push(body.revoked ? 1 : 0);
+  }
+  if (body?.quota !== undefined) {
+    const q = Number(body.quota);
+    if (!Number.isInteger(q) || q <= 0) return jsonResponse({ error: "Quota non valida." }, 400);
+    sets.push("quota = ?");
+    binds.push(q);
+  }
+  if (!sets.length) return jsonResponse({ error: "Nessuna modifica specificata." }, 400);
+  binds.push(id);
+
+  try {
+    await env.DB.prepare(`UPDATE agent_credentials SET ${sets.join(", ")} WHERE id = ?`).bind(...binds).run();
+  } catch {
+    return jsonResponse({ error: "Errore interno." }, 500);
+  }
+  return jsonResponse({ ok: true });
+}
+
+// Pagina statica (nessun dato incorporato: legge tutto via fetch a /admin/api/keys
+// con il secret inserito dall'operatore). Il secret sta solo in sessionStorage
+// del browser — sparisce alla chiusura della scheda.
+function adminPageHtml() {
+  return `<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Admin credenziali agente — Spazio Genesi</title>
+<meta name="robots" content="noindex">
+<style>
+  :root { --oro:#8B6914; --bg:#faf8f4; --card:#fff; --ink:#1f1d18; --muted:#6b6453; --line:#e7e1d4; --danger:#a33; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    line-height:1.5; padding:1.5rem; }
+  .wrap { max-width:920px; margin:0 auto; }
+  h1 { font-size:1.4rem; margin:.2rem 0 1.2rem; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px;
+    padding:1.3rem 1.4rem; margin-bottom:1.2rem; box-shadow:0 1px 3px rgba(0,0,0,.04); }
+  label { display:block; font-size:.82rem; color:var(--muted); margin-bottom:.25rem; }
+  input { font:inherit; padding:.5rem .6rem; border:1px solid var(--line); border-radius:7px; width:100%; }
+  .row { display:flex; gap:.8rem; flex-wrap:wrap; align-items:flex-end; }
+  .row > div { flex:1 1 160px; }
+  button { font:inherit; font-weight:600; padding:.55rem 1.1rem; border-radius:8px; border:1px solid var(--oro);
+    background:var(--oro); color:#fff; cursor:pointer; }
+  button.secondary { background:#fff; color:var(--ink); border-color:var(--line); }
+  button.danger { background:#fff; color:var(--danger); border-color:var(--danger); }
+  button:disabled { opacity:.5; cursor:default; }
+  table { border-collapse:collapse; width:100%; font-size:.88rem; }
+  th, td { border-bottom:1px solid var(--line); padding:.5rem .5rem; text-align:left; vertical-align:middle; }
+  th { color:var(--muted); font-weight:600; font-size:.78rem; text-transform:uppercase; letter-spacing:.02em; }
+  .pill { display:inline-block; font-size:.75rem; font-weight:600; padding:.15rem .55rem; border-radius:999px; }
+  .pill.ok { background:#eef6ec; color:#2f6b2a; }
+  .pill.revoked { background:#f7e9e9; color:var(--danger); }
+  .msg { font-size:.85rem; margin-top:.6rem; }
+  .msg.err { color:var(--danger); }
+  .msg.ok { color:#2f6b2a; }
+  .fingerprint { font-family:ui-monospace,Consolas,monospace; font-size:.82rem; word-break:break-all; }
+  .newkey { font-family:ui-monospace,Consolas,monospace; font-size:.85rem; background:#fdf6e3;
+    border:1px solid var(--oro); padding:.6rem .7rem; border-radius:8px; word-break:break-all; margin-top:.6rem; }
+  input[type="number"] { width:5.5rem; }
+  .qtybox { display:flex; gap:.4rem; align-items:center; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Admin credenziali agente <span style="color:var(--muted);font-weight:400;font-size:.9rem;">— Spazio Genesi</span></h1>
+
+  <div class="card" id="loginCard">
+    <label for="secretInput">Admin secret</label>
+    <div class="row">
+      <div><input type="password" id="secretInput" placeholder="X-Admin-Secret" autocomplete="off"></div>
+      <div style="flex:0 0 auto;"><button id="loginBtn">Entra</button></div>
+    </div>
+    <p class="msg" id="loginMsg"></p>
+  </div>
+
+  <div id="app" style="display:none;">
+    <div class="card">
+      <h2 style="font-size:1rem;margin:0 0 .8rem;">Nuova API key</h2>
+      <div class="row">
+        <div><label for="newLabel">Etichetta (partner)</label><input id="newLabel" placeholder="Convenzione Accademia X"></div>
+        <div style="flex:0 0 120px;"><label for="newQuota">Quota/mese</label><input id="newQuota" type="number" value="200" min="1"></div>
+        <div style="flex:0 0 auto;"><button id="issueBtn">Emetti</button></div>
+      </div>
+      <p class="msg" id="issueMsg"></p>
+      <div class="newkey" id="newKeyBox" style="display:none;"></div>
+    </div>
+
+    <div class="card">
+      <h2 style="font-size:1rem;margin:0 0 .8rem;">Credenziali esistenti <button class="secondary" id="refreshBtn" style="float:right;">Aggiorna</button></h2>
+      <table>
+        <thead><tr><th>Etichetta</th><th>Tipo</th><th>Quota</th><th>Usate</th><th>Stato</th><th>Creata</th><th></th></tr></thead>
+        <tbody id="keysBody"></tbody>
+      </table>
+      <p class="msg" id="listMsg"></p>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  var secretKey = "sg_admin_secret";
+  var loginCard = document.getElementById("loginCard");
+  var app = document.getElementById("app");
+  var loginMsg = document.getElementById("loginMsg");
+
+  function getSecret() { return sessionStorage.getItem(secretKey) || ""; }
+  function setSecret(v) { sessionStorage.setItem(secretKey, v); }
+  function clearSecret() { sessionStorage.removeItem(secretKey); }
+
+  function api(path, opts) {
+    opts = opts || {};
+    opts.headers = Object.assign({ "X-Admin-Secret": getSecret() }, opts.headers || {});
+    return fetch(path, opts).then(function (res) {
+      if (res.status === 403) {
+        clearSecret();
+        showLogin("Secret non valido o scaduto.");
+        throw new Error("unauthorized");
+      }
+      return res.json().then(function (body) {
+        if (!res.ok) throw new Error(body.error || ("HTTP " + res.status));
+        return body;
+      });
+    });
+  }
+
+  function showLogin(msg) {
+    loginCard.style.display = "";
+    app.style.display = "none";
+    loginMsg.textContent = msg || "";
+    loginMsg.className = "msg err";
+  }
+
+  function showApp() {
+    loginCard.style.display = "none";
+    app.style.display = "";
+    loadKeys();
+  }
+
+  function fmtDate(iso) {
+    if (!iso) return "—";
+    try { return new Date(iso).toLocaleString("it-IT", { dateStyle: "short", timeStyle: "short" }); } catch (e) { return iso; }
+  }
+
+  function rowHtml(k) {
+    var statusPill = k.revoked
+      ? '<span class="pill revoked">revocata</span>'
+      : '<span class="pill ok">attiva</span>';
+    var kindLabel = k.kind === "key" ? "API key" : "sessione";
+    var actions = '';
+    if (k.kind === "key") {
+      actions += '<button class="secondary qty-btn" data-id="' + k.id + '" style="margin-right:.4rem;">Modifica quota</button>';
+      if (!k.revoked) actions += '<button class="danger revoke-btn" data-id="' + k.id + '">Revoca</button>';
+    } else if (!k.revoked) {
+      actions += '<button class="danger revoke-btn" data-id="' + k.id + '">Revoca</button>';
+    }
+    return '<tr>' +
+      '<td>' + (k.label || '—') + '</td>' +
+      '<td>' + kindLabel + '</td>' +
+      '<td>' + k.quota + '</td>' +
+      '<td>' + k.used + '</td>' +
+      '<td>' + statusPill + '</td>' +
+      '<td>' + fmtDate(k.created_at) + '</td>' +
+      '<td>' + actions + '</td>' +
+      '</tr>';
+  }
+
+  function loadKeys() {
+    var listMsg = document.getElementById("listMsg");
+    listMsg.textContent = "Carico…";
+    listMsg.className = "msg";
+    api("/admin/api/keys").then(function (data) {
+      var body = document.getElementById("keysBody");
+      body.innerHTML = (data.keys || []).map(rowHtml).join("") || '<tr><td colspan="7">Nessuna credenziale.</td></tr>';
+      listMsg.textContent = "";
+      Array.prototype.forEach.call(document.querySelectorAll(".revoke-btn"), function (btn) {
+        btn.addEventListener("click", function () {
+          if (!confirm("Revocare questa credenziale?")) return;
+          api("/admin/api/keys/" + btn.dataset.id, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ revoked: true }) })
+            .then(loadKeys).catch(function (e) { listMsg.textContent = e.message; listMsg.className = "msg err"; });
+        });
+      });
+      Array.prototype.forEach.call(document.querySelectorAll(".qty-btn"), function (btn) {
+        btn.addEventListener("click", function () {
+          var q = prompt("Nuova quota mensile:");
+          if (!q) return;
+          api("/admin/api/keys/" + btn.dataset.id, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ quota: parseInt(q, 10) }) })
+            .then(loadKeys).catch(function (e) { listMsg.textContent = e.message; listMsg.className = "msg err"; });
+        });
+      });
+    }).catch(function (e) {
+      if (e.message !== "unauthorized") { listMsg.textContent = e.message; listMsg.className = "msg err"; }
+    });
+  }
+
+  document.getElementById("loginBtn").addEventListener("click", function () {
+    var v = document.getElementById("secretInput").value.trim();
+    if (!v) return;
+    setSecret(v);
+    api("/admin/api/keys").then(function () { showApp(); }).catch(function (e) {
+      if (e.message === "unauthorized") return;
+      loginMsg.textContent = e.message; loginMsg.className = "msg err";
+    });
+  });
+
+  document.getElementById("refreshBtn").addEventListener("click", function (e) { e.preventDefault(); loadKeys(); });
+
+  document.getElementById("issueBtn").addEventListener("click", function () {
+    var label = document.getElementById("newLabel").value.trim();
+    var quota = parseInt(document.getElementById("newQuota").value, 10);
+    var issueMsg = document.getElementById("issueMsg");
+    var box = document.getElementById("newKeyBox");
+    box.style.display = "none";
+    if (!label) { issueMsg.textContent = "Serve un'etichetta."; issueMsg.className = "msg err"; return; }
+    issueMsg.textContent = "Emissione…"; issueMsg.className = "msg";
+    api("/admin/api/keys", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ label: label, quota: quota }) })
+      .then(function (data) {
+        issueMsg.textContent = "Fatto. Copia la chiave ora — non sarà più recuperabile.";
+        issueMsg.className = "msg ok";
+        box.textContent = data.key;
+        box.style.display = "";
+        document.getElementById("newLabel").value = "";
+        loadKeys();
+      })
+      .catch(function (e) { if (e.message !== "unauthorized") { issueMsg.textContent = e.message; issueMsg.className = "msg err"; } });
+  });
+
+  if (getSecret()) {
+    api("/admin/api/keys").then(function () { showApp(); }).catch(function () {});
+  }
+})();
+</script>
+</body>
+</html>`;
+}
+
 // ── Entry point ──────────────────────────────────────────────────────────────
 
 export default {
@@ -609,6 +920,8 @@ export default {
       if (await isRateLimited(env.RL_API, ip)) return tooManyResponse();
     } else if (method === "GET" && (path === "/api/ots" || path === "/api/cert" || path === "/api/badge" || path === "/api/agent/token")) {
       if (await isRateLimited(env.RL_API, ip)) return tooManyResponse();
+    } else if (path.startsWith("/admin/api/")) {
+      if (await isRateLimited(env.RL_API, ip)) return tooManyResponse();
     }
 
     if (method === "GET"  && path === "/ping")        return handlePing(request);
@@ -626,6 +939,13 @@ export default {
     if (method === "POST" && path === "/api/agent/approve")   return handleAgentApprove(request, env, ctx);
     if (method === "GET"  && path === "/api/agent/token")     return handleAgentToken(url, env);
     if (method === "GET"  && path === "/agent/authorize")     return handleAgentAuthorizePage(url, env);
+    if (method === "GET"  && path === "/admin")                return htmlResponse(adminPageHtml());
+    if (method === "GET"  && path === "/admin/api/keys")       return (await verifyAdminSecret(request, env)) ? handleAdminKeysList(env) : adminUnauthorized();
+    if (method === "POST" && path === "/admin/api/keys")       return (await verifyAdminSecret(request, env)) ? handleAdminKeysIssue(request, env) : adminUnauthorized();
+    if (method === "PATCH" && path.startsWith("/admin/api/keys/")) {
+      const id = path.slice("/admin/api/keys/".length);
+      return (await verifyAdminSecret(request, env)) ? handleAdminKeysUpdate(request, env, id) : adminUnauthorized();
+    }
 
     return jsonResponse({ error: "Endpoint non trovato", path }, 404);
   },
