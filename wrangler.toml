@@ -58,7 +58,7 @@ DEV_KEY_QUOTA = "50"
 # Cloudflare secrets). Redirect URI registrati in FASE 0:
 # https://imgauth.spaziogenesi.org/api/dev/oauth/callback/<provider>
 GOOGLE_OAUTH_CLIENT_ID = "309187343194-vrk29hp8hiuhofom419qkl3hrqm01pk8.apps.googleusercontent.com"
-MS_OAUTH_CLIENT_ID = "1876aab5-0cb1-4bbd-acfe-7277f768e3d1"
+MS_OAUTH_CLIENT_ID = "5317d69f-c3ba-4543-8df5-e8877628ba5c"
 
 # Template PDF come ArrayBuffer (import in worker.js)
 [[rules]]
