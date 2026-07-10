@@ -1,0 +1,275 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "imgauth — API di attestazione opere digitali",
+    "version": "1.18.0",
+    "description": "Motore di attestazione Spazio Genesi ETS. Full privacy: l'impronta SHA-256 si calcola sul client, il file non viene mai inviato al server. Contratto reale in italiano (non tradurre i nomi campo). Vedi https://attestazione.spaziogenesi.org per l'interfaccia utente e https://github.com/SPAZIO-GENESI/imgauth per il codice sorgente (AGPL-3.0).",
+    "contact": { "name": "Spazio Genesi ETS", "url": "https://spaziogenesi.org" },
+    "license": { "name": "AGPL-3.0-only", "url": "https://github.com/SPAZIO-GENESI/imgauth/blob/main/LICENSE" }
+  },
+  "servers": [
+    { "url": "https://imgauth.spaziogenesi.org", "description": "produzione" }
+  ],
+  "components": {
+    "securitySchemes": {
+      "agentBearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "sg_k_<id>_<secret> oppure sg_s_<id>_<secret>",
+        "description": "Credenziale agente (P21): API key per convenzioni o session token da device flow. Sblocca SOLO il bypass della challenge Turnstile su POST /api/hash — HMAC, timestamp server e rate limit per-IP restano invariati. Facoltativa: senza header, il percorso Turnstile è identico a prima."
+      },
+      "adminSecret": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Admin-Secret",
+        "description": "Secret condiviso per il pannello /admin (gestione credenziali agente). STOPGAP di sicurezza: la stessa chiave distribuita e inserita nella dashboard https://imgauth.spaziogenesi.org/admin — non è Zero Trust, va usata solo dal gestore del servizio."
+      }
+    },
+    "schemas": {
+      "Errore": {
+        "type": "object",
+        "properties": { "error": { "type": "string" } }
+      }
+    }
+  },
+  "paths": {
+    "/ping": {
+      "get": {
+        "summary": "Health check",
+        "description": "Verifica che il Worker risponda e restituisce la versione del motore.",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": { "application/json": { "schema": { "type": "object", "properties": {
+              "ok": { "type": "boolean" }, "version": { "type": "string", "example": "1.18.0" }, "origin": { "type": "string", "nullable": true }
+            } } } }
+          }
+        }
+      }
+    },
+    "/api/hash": {
+      "post": {
+        "summary": "Attesta un'impronta SHA-256",
+        "description": "Percorso primario (dalla 1.15.0): riceve l'impronta calcolata sul client (full privacy). Percorso legacy: file inline base64 in `image` (hash calcolato dal server, tetto 100 MB). Se assente una credenziale agente valida (vedi agentBearer), è richiesto `turnstile_token` quando TURNSTILE_SECRET è configurato.",
+        "security": [ { "agentBearer": [] }, {} ],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "type": "object", "properties": {
+            "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "Impronta calcolata sul client (percorso primario)" },
+            "image": { "type": "string", "format": "byte", "description": "File inline base64 (percorso legacy, tetto 100 MB)" },
+            "name": { "type": "string" },
+            "type": { "type": "string", "description": "MIME dichiarato" },
+            "size": { "type": "integer", "description": "Dimensione dichiarata in byte (solo percorso client)" },
+            "titolo": { "type": "string", "maxLength": 150 },
+            "autore": { "type": "string", "maxLength": 100 },
+            "anno": { "type": "string", "maxLength": 50 },
+            "note": { "type": "string", "maxLength": 300 },
+            "turnstile_token": { "type": "string", "description": "Richiesto se non c'è credenziale agente e TURNSTILE_SECRET è configurato" }
+          } } } }
+        },
+        "responses": {
+          "200": { "description": "Attestazione emessa", "content": { "application/json": { "schema": { "type": "object", "properties": {
+            "sha256": { "type": "string" }, "dimensione_bytes": { "type": "integer", "nullable": true }, "tipo_mime": { "type": "string" },
+            "titolo": { "type": "string" }, "autore": { "type": "string" }, "anno": { "type": "string" }, "note": { "type": "string" },
+            "timestamp_iso": { "type": "string", "format": "date-time" }, "timestamp_leggibile": { "type": "string" },
+            "attestazione": { "type": "string" }, "emesso_da": { "type": "string" }, "hmac": { "type": "string", "nullable": true }
+          } } } } },
+          "400": { "description": "Campo mancante o malformato", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Errore" } } } },
+          "403": { "description": "Credenziale agente invalida, o verifica anti-bot non superata", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Errore" } } } },
+          "413": { "description": "File troppo grande (solo percorso legacy, max 100 MB)" },
+          "429": { "description": "Quota credenziale esaurita, o rate limit per-IP (60/60s)" }
+        }
+      }
+    },
+    "/api/verify": {
+      "post": {
+        "summary": "Verifica hash dichiarato vs file, e firma HMAC",
+        "description": "`image` (l'opera originale, non il PDF) è FACOLTATIVO dalla 1.15.0: senza, verifica solo la firma HMAC (il confronto hash/file è fatto dal client in locale).",
+        "requestBody": {
+          "required": true,
+          "content": { "multipart/form-data": { "schema": { "type": "object", "properties": {
+            "hash": { "type": "string" }, "image": { "type": "string", "format": "binary" },
+            "attestazione": { "type": "string" }, "hmac": { "type": "string" },
+            "titolo": { "type": "string" }, "autore": { "type": "string" }, "anno": { "type": "string" }, "note": { "type": "string" }
+          }, "required": ["hash"] } } }
+        },
+        "responses": {
+          "200": { "description": "Esito verifica", "content": { "application/json": { "schema": { "type": "object", "properties": {
+            "hash_dichiarato": { "type": "string" }, "hash_calcolato": { "type": "string", "nullable": true },
+            "coincide": { "type": "boolean", "nullable": true }, "hmac_valido": { "type": "boolean", "nullable": true }
+          } } } } },
+          "429": { "description": "Rate limit per-IP (60/60s)" }
+        }
+      }
+    },
+    "/api/cert-pdf": {
+      "post": {
+        "summary": "Genera il certificato PDF firmato",
+        "description": "Riceve l'oggetto restituito da POST /api/hash (deve includere `attestazione` + `hmac`, verificati server-side prima di firmare). Chiama authart server-to-server per la firma crittografica; archivia copia in R2.",
+        "security": [ { "agentBearer": [] }, {} ],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "description": "Oggetto completo restituito da POST /api/hash" } } } },
+        "responses": {
+          "200": { "description": "PDF firmato", "content": { "application/pdf": { "schema": { "type": "string", "format": "binary" } } } },
+          "400": { "description": "attestazione incoerente con sha256/timestamp_iso" },
+          "403": { "description": "HMAC non valido" },
+          "429": { "description": "Rate limit per-IP (10/60s, il più basso dell'API: endpoint costoso)" },
+          "503": { "description": "HMAC_SECRET non configurato (fail-closed)" }
+        }
+      }
+    },
+    "/api/ots": {
+      "get": {
+        "summary": "Prova OpenTimestamps (ancoraggio Bitcoin)",
+        "parameters": [ { "name": "hash", "in": "query", "required": true, "schema": { "type": "string", "pattern": "^[0-9a-f]{64}$" } } ],
+        "responses": {
+          "200": { "description": "File .ots", "content": { "application/octet-stream": { "schema": { "type": "string", "format": "binary" } } } },
+          "400": { "description": "hash malformato" },
+          "404": { "description": "prova assente" },
+          "429": { "description": "Rate limit per-IP (60/60s)" }
+        }
+      }
+    },
+    "/api/cert": {
+      "get": {
+        "summary": "Recupero certificato smarrito",
+        "description": "Restituisce dal R2 il PDF archiviato per quell'impronta (la più antica, se più emissioni). Stesso modello di fiducia del QR: recuperabile solo da chi conosce l'hash.",
+        "parameters": [ { "name": "hash", "in": "query", "required": true, "schema": { "type": "string", "pattern": "^[0-9a-f]{64}$" } } ],
+        "responses": {
+          "200": { "description": "PDF archiviato", "content": { "application/pdf": { "schema": { "type": "string", "format": "binary" } } } },
+          "400": { "description": "hash malformato" },
+          "404": { "description": "certificato assente" },
+          "429": { "description": "Rate limit per-IP (60/60s)" },
+          "503": { "description": "archivio non configurato" }
+        }
+      }
+    },
+    "/api/badge": {
+      "get": {
+        "summary": "Badge SVG \"Opera attestata\"",
+        "description": "Embeddabile via <img>. Verde solo se l'hash è realmente in archivio; mai errore HTTP (per non rompere l'immagine).",
+        "parameters": [ { "name": "hash", "in": "query", "required": true, "schema": { "type": "string" } } ],
+        "responses": {
+          "200": { "description": "SVG (verde 24h cache, grigio 60s cache)", "content": { "image/svg+xml": { "schema": { "type": "string" } } } }
+        }
+      }
+    },
+    "/api/status": {
+      "get": {
+        "summary": "Stato semaforico dei servizi",
+        "description": "worker/archive/signer/anchor. Cache 180s con stale-while-revalidate. CORS aperto (dato pubblico).",
+        "responses": { "200": { "description": "Stato", "content": { "application/json": { "schema": { "type": "object", "properties": {
+          "worker": { "type": "string", "enum": ["ok", "down"] }, "archive": { "type": "string" }, "signer": { "type": "string" }, "anchor": { "type": "string" },
+          "checked_at": { "type": "string", "format": "date-time" }
+        } } } } } }
+      }
+    },
+    "/api/status-history": {
+      "get": { "summary": "Storico 90 giorni per componente", "description": "Rollup giornaliero per la pagina /status/. CORS aperto.",
+        "responses": { "200": { "description": "Storico", "content": { "application/json": { "schema": { "type": "object" } } } } } }
+    },
+    "/api/health-log": {
+      "get": { "summary": "Eventi fini di salute per un giorno", "description": "Errori, degradi, rallentamenti sotto soglia. CORS aperto.",
+        "parameters": [ { "name": "day", "in": "query", "required": false, "schema": { "type": "string", "format": "date" }, "description": "default: oggi UTC" } ],
+        "responses": { "200": { "description": "Eventi", "content": { "application/json": { "schema": { "type": "object" } } } } } }
+    },
+    "/c/{hash}": {
+      "get": {
+        "summary": "Pagina pubblica \"certificato verificabile online\"",
+        "description": "HTML server-rendered: impronta, data, ancoraggio, QR. 404 se l'opera non è in archivio.",
+        "parameters": [ { "name": "hash", "in": "path", "required": true, "schema": { "type": "string", "pattern": "^[0-9a-f]{64}$" } } ],
+        "responses": { "200": { "description": "Pagina HTML", "content": { "text/html": {} } }, "404": { "description": "Non in archivio" } }
+      }
+    },
+    "/api/agent/authorize": {
+      "post": {
+        "summary": "Avvia il device flow (P21)",
+        "description": "Nessuna autenticazione richiesta. Crea una richiesta di autorizzazione a breve scadenza.",
+        "responses": { "200": { "description": "Codice generato", "content": { "application/json": { "schema": { "type": "object", "properties": {
+          "code": { "type": "string" }, "verification_url": { "type": "string" }, "expires_in": { "type": "integer", "example": 600 }, "interval": { "type": "integer", "example": 3 }
+        } } } } }, "429": { "description": "Rate limit per-IP (60/60s)" } }
+      }
+    },
+    "/agent/authorize": {
+      "get": {
+        "summary": "Pagina di autorizzazione device flow",
+        "description": "HTML servita dal Worker con widget Turnstile: l'umano autorizza qui l'agente/MCP.",
+        "parameters": [ { "name": "code", "in": "query", "required": true, "schema": { "type": "string" } } ],
+        "responses": { "200": { "description": "Pagina HTML", "content": { "text/html": {} } }, "400": { "description": "codice non valido" }, "410": { "description": "richiesta scaduta" } }
+      }
+    },
+    "/api/agent/approve": {
+      "post": {
+        "summary": "Approva il device flow, genera il session token",
+        "description": "Chiamata dalla pagina /agent/authorize dopo il completamento della challenge Turnstile.",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "properties": {
+          "code": { "type": "string" }, "turnstile_token": { "type": "string" }
+        }, "required": ["code", "turnstile_token"] } } } },
+        "responses": {
+          "200": { "description": "Approvato" }, "400": { "description": "codice o token mancante" },
+          "403": { "description": "verifica anti-bot non superata" }, "409": { "description": "richiesta già gestita" },
+          "410": { "description": "richiesta scaduta" }, "429": { "description": "Rate limit per-IP (60/60s)" }
+        }
+      }
+    },
+    "/api/agent/token": {
+      "get": {
+        "summary": "Polling del device flow",
+        "description": "Il token è consegnato UNA SOLA VOLTA: dopo la prima lettura, i poll successivi restituiscono status 'claimed'.",
+        "parameters": [ { "name": "code", "in": "query", "required": true, "schema": { "type": "string" } } ],
+        "responses": {
+          "200": { "description": "Stato o token", "content": { "application/json": { "schema": { "type": "object", "properties": {
+            "status": { "type": "string", "enum": ["pending", "approved", "claimed"] }, "token": { "type": "string", "nullable": true, "description": "presente solo su status:approved, una sola volta" }
+          } } } } },
+          "410": { "description": "richiesta scaduta" }, "429": { "description": "Rate limit per-IP (60/60s)" }
+        }
+      }
+    },
+    "/admin": {
+      "get": {
+        "summary": "Pannello gestione credenziali agente",
+        "description": "Pagina HTML (nessun dato incorporato, nessuna autenticazione per vederla — il secret si inserisce nel form e viene usato per le chiamate a /admin/api/keys). ⚠️ STOPGAP: protetto da secret condiviso, non da Cloudflare Access.",
+        "responses": { "200": { "description": "Pagina HTML", "content": { "text/html": {} } } }
+      }
+    },
+    "/admin/api/keys": {
+      "get": {
+        "summary": "Elenca le credenziali agente",
+        "security": [ { "adminSecret": [] } ],
+        "responses": {
+          "200": { "description": "Elenco", "content": { "application/json": { "schema": { "type": "object", "properties": { "keys": { "type": "array", "items": { "type": "object", "properties": {
+            "id": { "type": "string" }, "kind": { "type": "string", "enum": ["key", "session"] }, "label": { "type": "string" },
+            "quota": { "type": "integer" }, "used": { "type": "integer" }, "period": { "type": "string", "nullable": true },
+            "expires_at": { "type": "integer", "nullable": true }, "revoked": { "type": "integer" }, "created_at": { "type": "string" }
+          } } } } } } } },
+          "403": { "description": "X-Admin-Secret assente o errato" }
+        }
+      },
+      "post": {
+        "summary": "Emette una nuova API key",
+        "security": [ { "adminSecret": [] } ],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "properties": {
+          "label": { "type": "string", "maxLength": 200 }, "quota": { "type": "integer", "minimum": 1 }
+        }, "required": ["label", "quota"] } } } },
+        "responses": {
+          "201": { "description": "Chiave emessa (mostrata una sola volta, mai più recuperabile)", "content": { "application/json": { "schema": { "type": "object", "properties": {
+            "id": { "type": "string" }, "key": { "type": "string", "example": "sg_k_<id>_<secret>" }, "label": { "type": "string" }, "quota": { "type": "integer" }
+          } } } } },
+          "400": { "description": "etichetta mancante o quota non valida" }, "403": { "description": "X-Admin-Secret assente o errato" }
+        }
+      }
+    },
+    "/admin/api/keys/{id}": {
+      "patch": {
+        "summary": "Revoca o modifica la quota di una credenziale",
+        "security": [ { "adminSecret": [] } ],
+        "parameters": [ { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "pattern": "^[0-9a-f]{8}$" } } ],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "properties": {
+          "revoked": { "type": "boolean" }, "quota": { "type": "integer", "minimum": 1 }
+        } } } } },
+        "responses": {
+          "200": { "description": "Aggiornata" }, "400": { "description": "id o corpo non valido" }, "403": { "description": "X-Admin-Secret assente o errato" }
+        }
+      }
+    }
+  }
+}

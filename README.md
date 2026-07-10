@@ -30,6 +30,13 @@ Client di riferimento: [attest-mcp](https://github.com/SPAZIO-GENESI/attest-mcp)
 server MCP che espone il servizio agli agenti AI mantenendo la stessa full
 privacy del sito (hash calcolato in locale, mai i byte del file).
 
+## Documentazione API
+
+Contratto completo in formato OpenAPI 3.0: [`/openapi.json`](https://imgauth.spaziogenesi.org/openapi.json)
+(machine-readable, importabile in Postman/Insomnia/Swagger UI) o
+[`/docs`](https://imgauth.spaziogenesi.org/docs) per la stessa documentazione
+in una pagina leggibile — auto-ospitata, nessuna dipendenza di terze parti.
+
 ## Licenza
 
 Copyright (C) 2026 Spazio Genesi ETS.

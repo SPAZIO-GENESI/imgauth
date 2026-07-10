@@ -23,12 +23,19 @@
  *                         D1: errori, degradi e rallentamenti sotto soglia (drill-down /status)
  *   (cron) scheduled    → campiona lo stato e aggiorna il rollup giornaliero in R2
  *   GET  /ping          → health check
+ *   POST /api/agent/*, GET /agent/authorize → accesso agenti (API key + device
+ *                         flow, P21): bypass del solo Turnstile su /api/hash
+ *   GET  /admin, /admin/api/keys → pannello gestione credenziali agente
+ *                         (stopgap ADMIN_SECRET, vedi CLAUDE.md)
+ *   GET  /openapi.json, /docs → contratto API machine-readable e pagina di
+ *                         consultazione (self-hosted, nessuna dipendenza esterna)
  */
 
 import { PDFDocument, rgb, StandardFonts } from "pdf-lib";
 import { encode as encodeQR } from "uqr";
 import certTemplatePdf from "./certificato_opera_pdf_mod.pdf";
 import pkg from "./package.json";
+import openapiSpec from "./openapi.json";
 
 // Versione del motore: sorgente di verità unica = package.json (vedi CLAUDE.md › Versioning).
 // Compare in /ping e nel blocco attestazione del certificato PDF.
@@ -899,6 +906,82 @@ function adminPageHtml() {
 </html>`;
 }
 
+// ── Documentazione API (OpenAPI + pagina di consultazione) ──────────────────
+// GET /openapi.json serve lo spec OpenAPI 3.0 (openapi.json nel repo, sorgente
+// di verità del contratto machine-readable — importabile in Postman/Insomnia
+// o in una Swagger UI esterna). GET /docs lo rende in una pagina HTML
+// leggibile, costruita a mano (stesso principio "no CDN di terze parti" già
+// seguito per pdf.js e per le altre pagine del Worker: niente bundle di
+// Swagger UI, solo HTML/CSS statico generato dallo stesso JSON).
+function methodBadgeColor(m) {
+  return { GET: "#2f6b2a", POST: "#8B6914", PATCH: "#7a4f9e", DELETE: "#a33" }[m] || "#555";
+}
+
+function apiDocsHtml(spec) {
+  const rows = [];
+  for (const [path, ops] of Object.entries(spec.paths || {})) {
+    for (const [method, op] of Object.entries(ops)) {
+      const auth = (op.security || [])
+        .map(s => Object.keys(s)[0])
+        .filter(Boolean);
+      const authLabel = auth.length
+        ? auth.map(a => a === "agentBearer" ? "bearer agente (facoltativo)" : a === "adminSecret" ? "X-Admin-Secret" : a).join(" · ")
+        : "nessuna";
+      const responses = Object.entries(op.responses || {})
+        .map(([code, r]) => `<span class="code">${escHtml(code)}</span> ${escHtml(r.description || "")}`)
+        .join("<br>");
+      rows.push(`<div class="ep">
+        <div class="ep-head">
+          <span class="m" style="background:${methodBadgeColor(method.toUpperCase())}">${escHtml(method.toUpperCase())}</span>
+          <span class="p">${escHtml(path)}</span>
+        </div>
+        <p class="s">${escHtml(op.summary || "")}</p>
+        ${op.description ? `<p class="d">${escHtml(op.description)}</p>` : ""}
+        <p class="auth"><span class="k">Auth:</span> ${authLabel}</p>
+        <p class="resp"><span class="k">Risposte:</span><br>${responses}</p>
+      </div>`);
+    }
+  }
+  return `<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>API — ${escHtml(spec.info?.title || "imgauth")}</title>
+<meta name="robots" content="noindex">
+<style>
+  :root { --oro:#8B6914; --bg:#faf8f4; --card:#fff; --ink:#1f1d18; --muted:#6b6453; --line:#e7e1d4; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    line-height:1.5; padding:1.5rem; }
+  .wrap { max-width:840px; margin:0 auto; }
+  h1 { font-size:1.4rem; margin:.2rem 0 .3rem; }
+  .lead { color:var(--muted); font-size:.92rem; margin:0 0 1.2rem; }
+  .lead a { color:var(--oro); }
+  .ep { background:var(--card); border:1px solid var(--line); border-radius:10px;
+    padding:1rem 1.1rem; margin-bottom:.8rem; }
+  .ep-head { display:flex; align-items:center; gap:.6rem; margin-bottom:.4rem; }
+  .m { font-size:.72rem; font-weight:700; color:#fff; padding:.15rem .5rem; border-radius:5px; letter-spacing:.03em; }
+  .p { font-family:ui-monospace,Consolas,monospace; font-size:.92rem; }
+  .s { margin:.2rem 0; font-weight:600; }
+  .d { margin:.2rem 0; color:var(--muted); font-size:.86rem; }
+  .auth, .resp { font-size:.82rem; margin:.3rem 0 0; }
+  .k { color:var(--muted); }
+  .code { font-family:ui-monospace,Consolas,monospace; background:#f4f0e6; padding:.05rem .35rem; border-radius:4px; font-size:.78rem; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>${escHtml(spec.info?.title || "API")}</h1>
+  <p class="lead">${escHtml(spec.info?.description || "")}
+    Spec machine-readable: <a href="/openapi.json">/openapi.json</a>.</p>
+  ${rows.join("\n")}
+</div>
+</body>
+</html>`;
+}
+
 // ── Entry point ──────────────────────────────────────────────────────────────
 
 export default {
@@ -939,6 +1022,8 @@ export default {
     if (method === "POST" && path === "/api/agent/approve")   return handleAgentApprove(request, env, ctx);
     if (method === "GET"  && path === "/api/agent/token")     return handleAgentToken(url, env);
     if (method === "GET"  && path === "/agent/authorize")     return handleAgentAuthorizePage(url, env);
+    if (method === "GET"  && path === "/openapi.json")          return withPublicCors(jsonResponse(openapiSpec));
+    if (method === "GET"  && path === "/docs")                  return htmlResponse(apiDocsHtml(openapiSpec));
     if (method === "GET"  && path === "/admin")                return htmlResponse(adminPageHtml());
     if (method === "GET"  && path === "/admin/api/keys")       return (await verifyAdminSecret(request, env)) ? handleAdminKeysList(env) : adminUnauthorized();
     if (method === "POST" && path === "/admin/api/keys")       return (await verifyAdminSecret(request, env)) ? handleAdminKeysIssue(request, env) : adminUnauthorized();
