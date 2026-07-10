@@ -49,6 +49,11 @@ SIGNER_URL = "https://sgart.azurewebsites.net/sign"
 # impostati (wrangler secret put …).
 CERT_NOTIFY_EVERY = "1"
 
+# P22: quota mensile delle chiavi sg_k_… emesse self-service da /developer/keys
+# (email verificata OAuth). Non è un segreto (a differenza dei client secret
+# OAuth, che sono Cloudflare secrets — vedi CLAUDE.md § imgauth › Segreti).
+DEV_KEY_QUOTA = "50"
+
 # Template PDF come ArrayBuffer (import in worker.js)
 [[rules]]
 type = "Data"

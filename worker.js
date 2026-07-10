@@ -79,6 +79,38 @@ const AGENT_403_ALERT_THRESHOLD = 10;               // avviso Telegram oltre N c
 const AGENT_TURNSTILE_SITEKEY = "0x4AAAAAADiPceBIwTz5n4hG";
 const AUTH_CODE_RE = /^[0-9a-f]{16}$/i;
 
+// ── Self-service API key con verifica email OAuth (P22) ─────────────────────
+// Parametri tarabili (vedi P22-DESIGN-selfservice-keys.md §6). La quota vera
+// viene da env.DEV_KEY_QUOTA ([vars] in wrangler.toml); questo è solo il
+// fallback se la var manca (es. ambiente locale senza wrangler.toml aggiornato).
+const DEV_OAUTH_STATE_TTL_MS  = 10 * 60 * 1000;             // 10 minuti, stato ad uso singolo
+const DEV_KEY_QUOTA_DEFAULT   = 50;                          // attestazioni/mese
+const DEV_OWNER_RETENTION_MS  = 180 * 24 * 60 * 60 * 1000;   // 180 giorni post-revoca (FASE 2)
+
+// Endpoint OAuth "verifica email one-shot" (authorization code, scope openid
+// email): niente login/sessione, l'access token si usa per UNA chiamata a
+// userinfo e si scarta (vedi invariante 4 nel design). clientIdVar/clientSecretVar
+// puntano ai nomi delle env var/secret Cloudflare — se assenti il provider è
+// considerato non configurato (bottone assente, endpoint 503, fail-closed parziale).
+const DEV_PROVIDERS = {
+  google: {
+    label: "Google",
+    authorizeUrl: "https://accounts.google.com/o/oauth2/v2/auth",
+    tokenUrl: "https://oauth2.googleapis.com/token",
+    userinfoUrl: "https://openidconnect.googleapis.com/v1/userinfo",
+    clientIdVar: "GOOGLE_OAUTH_CLIENT_ID",
+    clientSecretVar: "GOOGLE_OAUTH_CLIENT_SECRET",
+  },
+  microsoft: {
+    label: "Microsoft",
+    authorizeUrl: "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
+    tokenUrl: "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+    userinfoUrl: "https://graph.microsoft.com/oidc/userinfo",
+    clientIdVar: "MS_OAUTH_CLIENT_ID",
+    clientSecretVar: "MS_OAUTH_CLIENT_SECRET",
+  },
+};
+
 // ── Helpers CORS ────────────────────────────────────────────────────────────
 
 function corsHeaders() {
@@ -595,6 +627,231 @@ async function sweepExpiredAgentRows(env) {
   }
 }
 
+// ── Self-service API key con verifica email OAuth (P22, FASE 1) ─────────────
+// Terza via di emissione della STESSA credenziale sg_k_… (non un terzo tipo):
+// l'umano verifica la propria email con un OAuth one-shot (niente login/sessione,
+// l'access token si usa solo per leggere l'email e si scarta), e riceve subito
+// la chiave. Post-moderazione dal pannello /admin (FASE 2): Telegram a ogni
+// emissione, revoca a un tap. Vedi P22-DESIGN-selfservice-keys.md.
+
+// GET /developer/keys — pagina di ingresso: spiega il servizio, informativa
+// privacy sintetica nel punto di raccolta, bottoni "Continua con …" solo per
+// i provider effettivamente configurati (client id + secret presenti).
+function devKeysPageHtml(env) {
+  const quota = Number(env?.DEV_KEY_QUOTA) || DEV_KEY_QUOTA_DEFAULT;
+  const buttons = Object.entries(DEV_PROVIDERS)
+    .filter(([, cfg]) => env?.[cfg.clientIdVar] && env?.[cfg.clientSecretVar])
+    .map(([key, cfg]) => `<a class="btn primary" href="/api/dev/oauth/start?provider=${key}">Continua con ${escHtml(cfg.label)}</a>`);
+
+  const body = `<h1>Chiave API per sviluppatori</h1>
+    <p class="lead">Verifica la tua email per ottenere subito una chiave <code>sg_k_…</code> con
+    <b>${quota} attestazioni al mese</b>, da usare come bearer su <code>/api/hash</code> per saltare
+    la verifica anti-bot (HMAC, marca temporale e limiti per-IP restano invariati).</p>
+    <p class="muted">Cosa salviamo: la tua email, il provider scelto e la data di emissione — solo
+    per erogare la chiave, moderarne l'uso (avviso e revoca in caso di abuso) e, su tua richiesta,
+    cancellarli. Non conserviamo il token del provider, non creiamo una sessione, non facciamo
+    marketing. Dettagli nella
+    <a href="${CERT_PAGE_BASE}/privacy.html">informativa privacy</a>.</p>
+    <div class="actions">${buttons.join("") || '<span class="muted">Nessun provider è al momento configurato.</span>'}</div>
+    <p class="foot" style="margin-top:1.4rem;">Serve una quota più alta o un accesso via convenzione?
+    Scrivi a <a href="mailto:it@spaziogenesi.org">it@spaziogenesi.org</a>.</p>`;
+  return certPageShell("Chiave API sviluppatori", body);
+}
+
+// GET /api/dev/oauth/start?provider=google|microsoft — apre lo state anti-CSRF
+// (riga effimera in D1, nessun nuovo segreto di firma: lo state È il record)
+// e reindirizza all'authorize URL del provider.
+async function handleDevOAuthStart(url, env) {
+  const provider = url.searchParams.get("provider") || "";
+  const cfg = DEV_PROVIDERS[provider];
+  if (!cfg) return jsonResponse({ error: "Provider non valido." }, 400);
+  const clientId = env?.[cfg.clientIdVar];
+  const clientSecret = env?.[cfg.clientSecretVar];
+  if (!clientId || !clientSecret || !env?.DB) {
+    return jsonResponse({ error: "Provider non configurato." }, 503);
+  }
+
+  const state = randomHex(16);
+  const now = Date.now();
+  try {
+    await env.DB.prepare(
+      `INSERT INTO dev_oauth_state (state, provider, created_at, expires_at) VALUES (?, ?, ?, ?)`
+    ).bind(state, provider, now, now + DEV_OAUTH_STATE_TTL_MS).run();
+  } catch {
+    return jsonResponse({ error: "Errore interno." }, 500);
+  }
+
+  const redirectUri = `${url.origin}/api/dev/oauth/callback/${provider}`;
+  const authUrl = new URL(cfg.authorizeUrl);
+  authUrl.searchParams.set("client_id", clientId);
+  authUrl.searchParams.set("redirect_uri", redirectUri);
+  authUrl.searchParams.set("response_type", "code");
+  authUrl.searchParams.set("scope", "openid email");
+  authUrl.searchParams.set("state", state);
+  authUrl.searchParams.set("prompt", "select_account");
+  return Response.redirect(authUrl.toString(), 302);
+}
+
+function devAlreadyActiveBody(id) {
+  return `<h1>Hai già una chiave attiva</h1>
+    <p class="lead">Il tuo indirizzo email ha già una chiave self-service attiva
+    (id <span class="fingerprint">${escHtml(id)}</span>).</p>
+    <p class="muted">Puoi continuare a usare quella chiave. Se l'hai persa, o vuoi revocarla per
+    riceverne una nuova, scrivi a <a href="mailto:it@spaziogenesi.org">it@spaziogenesi.org</a>.</p>`;
+}
+
+function devKeyIssuedBody(key, quota) {
+  return `<h1>Chiave creata ✓</h1>
+    <p class="lead">Copiala ora: per motivi di sicurezza non potremo più mostrartela.</p>
+    <div class="fingerprint" style="background:#fdf6e3;border:1px solid var(--oro);padding:.7rem .8rem;border-radius:8px;margin:1rem 0;">${escHtml(key)}</div>
+    <p class="muted">Quota: ${quota} attestazioni al mese, come header
+    <span class="fingerprint">Authorization: Bearer ${escHtml(key)}</span> su <code>POST /api/hash</code>.
+    Se la perdi: scrivi a <a href="mailto:it@spaziogenesi.org">it@spaziogenesi.org</a> per la revoca,
+    poi torna qui per riemetterne una nuova.</p>
+    <div class="actions">
+      <a class="btn primary" href="/docs">Documentazione API</a>
+      <a class="btn" href="https://github.com/SPAZIO-GENESI/attest-mcp">Server MCP</a>
+    </div>`;
+}
+
+// GET /api/dev/oauth/callback/<provider>?code=&state= — scambia il code,
+// legge l'email verificata da userinfo e scarta il token, poi emette (o
+// rifiuta se già esiste) la chiave sg_k_… per quell'email.
+async function handleDevOAuthCallback(url, provider, env, ctx) {
+  const cfg = DEV_PROVIDERS[provider];
+  if (!cfg) {
+    return htmlResponse(certPageShell("Provider non valido",
+      `<p class="lead">Provider OAuth non riconosciuto.</p>`), 400);
+  }
+  const clientId = env?.[cfg.clientIdVar];
+  const clientSecret = env?.[cfg.clientSecretVar];
+  if (!clientId || !clientSecret || !env?.DB) {
+    return htmlResponse(certPageShell("Servizio non disponibile",
+      `<p class="lead">Questo provider non è al momento configurato. Riprova più tardi o usa l'altro.</p>`), 503);
+  }
+
+  if (url.searchParams.get("error")) {
+    return htmlResponse(certPageShell("Richiesta annullata",
+      `<p class="lead">L'accesso non è stato completato. Torna alla pagina
+      <a href="/developer/keys">Chiave API sviluppatori</a> e riprova quando vuoi.</p>`), 200);
+  }
+
+  const code = url.searchParams.get("code") || "";
+  const state = url.searchParams.get("state") || "";
+  if (!code || !state) {
+    return htmlResponse(certPageShell("Richiesta non valida",
+      `<p class="lead">Parametri mancanti. Riparti da <a href="/developer/keys">qui</a>.</p>`), 400);
+  }
+
+  // Stato anti-CSRF ad uso singolo: letto e cancellato subito, chiunque lo
+  // riusi (replay) trova la riga già sparita.
+  let stateRow;
+  try {
+    stateRow = await env.DB.prepare(`SELECT provider, expires_at FROM dev_oauth_state WHERE state = ?`).bind(state).first();
+    if (stateRow) await env.DB.prepare(`DELETE FROM dev_oauth_state WHERE state = ?`).bind(state).run();
+  } catch {
+    return htmlResponse(certPageShell("Errore", `<p class="lead">Errore interno. Riprova.</p>`), 500);
+  }
+  if (!stateRow || stateRow.provider !== provider || Date.now() > stateRow.expires_at) {
+    return htmlResponse(certPageShell("Sessione scaduta",
+      `<p class="lead">Questa richiesta di accesso è scaduta o non è valida. Torna a
+      <a href="/developer/keys">Chiave API sviluppatori</a> e riprova.</p>`), 400);
+  }
+
+  const redirectUri = `${url.origin}/api/dev/oauth/callback/${provider}`;
+  const tokenBody = new URLSearchParams({
+    client_id: clientId,
+    client_secret: clientSecret,
+    code,
+    redirect_uri: redirectUri,
+    grant_type: "authorization_code",
+  });
+  const tokenRes = await fetchWithTimeout(cfg.tokenUrl, 10000, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: tokenBody.toString(),
+  });
+  if (!tokenRes || !tokenRes.ok) {
+    return htmlResponse(certPageShell("Accesso non riuscito",
+      `<p class="lead">Non siamo riusciti a completare l'accesso con ${escHtml(cfg.label)}. Riprova.</p>`), 502);
+  }
+  let tokenJson;
+  try { tokenJson = await tokenRes.json(); } catch {
+    return htmlResponse(certPageShell("Accesso non riuscito", `<p class="lead">Risposta non valida dal provider. Riprova.</p>`), 502);
+  }
+  const accessToken = tokenJson?.access_token;
+  if (!accessToken) {
+    return htmlResponse(certPageShell("Accesso non riuscito", `<p class="lead">Il provider non ha restituito un token valido. Riprova.</p>`), 502);
+  }
+
+  const userRes = await fetchWithTimeout(cfg.userinfoUrl, 10000, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!userRes || !userRes.ok) {
+    return htmlResponse(certPageShell("Accesso non riuscito",
+      `<p class="lead">Non siamo riusciti a leggere l'email dal tuo account ${escHtml(cfg.label)}. Riprova.</p>`), 502);
+  }
+  let userJson;
+  try { userJson = await userRes.json(); } catch {
+    return htmlResponse(certPageShell("Accesso non riuscito", `<p class="lead">Risposta non valida dal provider. Riprova.</p>`), 502);
+  }
+  // Da qui in poi accessToken/tokenJson/userJson non sono più referenziati:
+  // niente store, niente log (invariante 4 del design).
+
+  if (provider === "google" && userJson?.email_verified === false) {
+    return htmlResponse(certPageShell("Email non verificata",
+      `<p class="lead">Il tuo account Google non ha un'email verificata. Usa un altro account o l'altro provider.</p>`), 403);
+  }
+  const rawEmail = userJson?.email;
+  if (!rawEmail || typeof rawEmail !== "string") {
+    return htmlResponse(certPageShell("Email non disponibile",
+      `<p class="lead">Il tuo account non espone un indirizzo email leggibile. Prova con l'altro provider.</p>`), 403);
+  }
+  const email = rawEmail.trim().toLowerCase();
+
+  let existing;
+  try {
+    existing = await env.DB.prepare(`SELECT id FROM agent_credentials WHERE owner_email = ? AND revoked = 0`).bind(email).first();
+  } catch {
+    return htmlResponse(certPageShell("Errore", `<p class="lead">Errore interno. Riprova.</p>`), 500);
+  }
+  if (existing) {
+    return htmlResponse(certPageShell("Chiave già attiva", devAlreadyActiveBody(existing.id)), 200);
+  }
+
+  const id          = randomHex(4); // 8 caratteri esadecimali
+  const secret      = randomBase64Url(32);
+  const key         = `sg_k_${id}_${secret}`;
+  const secretHash  = await sha256Hex(secret);
+  const createdAt   = new Date().toISOString();
+  const period      = createdAt.slice(0, 7); // 'YYYY-MM'
+  const quota       = Number(env?.DEV_KEY_QUOTA) || DEV_KEY_QUOTA_DEFAULT;
+
+  try {
+    await env.DB.prepare(
+      `INSERT INTO agent_credentials (id, kind, secret_hash, label, quota, used, period, expires_at, revoked, created_at, owner_email, owner_provider)
+       VALUES (?, 'key', ?, 'self-service', ?, 0, ?, NULL, 0, ?, ?, ?)`
+    ).bind(id, secretHash, quota, period, createdAt, email, provider).run();
+  } catch {
+    // Corsa con l'indice UNIQUE parziale (ux_agent_owner_active): un'altra
+    // richiesta concorrente per la stessa email ha vinto nel frattempo.
+    let raced;
+    try {
+      raced = await env.DB.prepare(`SELECT id FROM agent_credentials WHERE owner_email = ? AND revoked = 0`).bind(email).first();
+    } catch { /* raced resta undefined: si cade nell'errore generico sotto */ }
+    if (raced) return htmlResponse(certPageShell("Chiave già attiva", devAlreadyActiveBody(raced.id)), 200);
+    return htmlResponse(certPageShell("Errore", `<p class="lead">Errore interno. Riprova.</p>`), 500);
+  }
+
+  if (ctx && typeof ctx.waitUntil === "function") {
+    ctx.waitUntil(sendTelegram(env,
+      `🔑 Spazio Genesi — chiave self-service emessa · ${email} via ${cfg.label} · id ${id} · quota ${quota}/mese`
+    ).catch(() => {}));
+  }
+
+  return htmlResponse(certPageShell("Chiave API sviluppatori", devKeyIssuedBody(key, quota)));
+}
+
 // ── Pannello admin credenziali agente (P21 follow-up) ───────────────────────
 // STOPGAP: protetto da un secret condiviso (env.ADMIN_SECRET, header
 // X-Admin-Secret) — stesso pattern di X-Sign-Secret tra imgauth e authart.
@@ -970,6 +1227,8 @@ export default {
       if (await isRateLimited(env.RL_API, ip)) return tooManyResponse();
     } else if (method === "GET" && (path === "/api/ots" || path === "/api/cert" || path === "/api/badge" || path === "/api/agent/token")) {
       if (await isRateLimited(env.RL_API, ip)) return tooManyResponse();
+    } else if (method === "GET" && (path === "/developer/keys" || path === "/api/dev/oauth/start" || path.startsWith("/api/dev/oauth/callback/"))) {
+      if (await isRateLimited(env.RL_API, ip)) return tooManyResponse();
     } else if (path.startsWith("/admin/api/")) {
       if (await isRateLimited(env.RL_API, ip)) return tooManyResponse();
     }
@@ -989,6 +1248,12 @@ export default {
     if (method === "POST" && path === "/api/agent/approve")   return handleAgentApprove(request, env, ctx);
     if (method === "GET"  && path === "/api/agent/token")     return handleAgentToken(url, env);
     if (method === "GET"  && path === "/agent/authorize")     return handleAgentAuthorizePage(url, env);
+    if (method === "GET"  && path === "/developer/keys")      return htmlResponse(devKeysPageHtml(env));
+    if (method === "GET"  && path === "/api/dev/oauth/start") return handleDevOAuthStart(url, env);
+    if (method === "GET"  && path.startsWith("/api/dev/oauth/callback/")) {
+      const provider = path.slice("/api/dev/oauth/callback/".length);
+      return handleDevOAuthCallback(url, provider, env, ctx);
+    }
     if (method === "GET"  && path === "/openapi.json")          return withPublicCors(jsonResponse(openapiSpec));
     if (method === "GET"  && path === "/docs")                  return htmlResponse(swaggerUiHtml());
     if (method === "GET"  && path === "/admin")                return htmlResponse(adminPageHtml());
