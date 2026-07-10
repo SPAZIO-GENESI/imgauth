@@ -17,12 +17,6 @@
         "scheme": "bearer",
         "bearerFormat": "sg_k_<id>_<secret> oppure sg_s_<id>_<secret>",
         "description": "Credenziale agente (P21): API key per convenzioni o session token da device flow. Sblocca SOLO il bypass della challenge Turnstile su POST /api/hash — HMAC, timestamp server e rate limit per-IP restano invariati. Facoltativa: senza header, il percorso Turnstile è identico a prima."
-      },
-      "adminSecret": {
-        "type": "apiKey",
-        "in": "header",
-        "name": "X-Admin-Secret",
-        "description": "Secret condiviso per il pannello /admin (gestione credenziali agente). STOPGAP di sicurezza: la stessa chiave distribuita e inserita nella dashboard https://imgauth.spaziogenesi.org/admin — non è Zero Trust, va usata solo dal gestore del servizio."
       }
     },
     "schemas": {
@@ -221,53 +215,6 @@
             "status": { "type": "string", "enum": ["pending", "approved", "claimed"] }, "token": { "type": "string", "nullable": true, "description": "presente solo su status:approved, una sola volta" }
           } } } } },
           "410": { "description": "richiesta scaduta" }, "429": { "description": "Rate limit per-IP (60/60s)" }
-        }
-      }
-    },
-    "/admin": {
-      "get": {
-        "summary": "Pannello gestione credenziali agente",
-        "description": "Pagina HTML (nessun dato incorporato, nessuna autenticazione per vederla — il secret si inserisce nel form e viene usato per le chiamate a /admin/api/keys). ⚠️ STOPGAP: protetto da secret condiviso, non da Cloudflare Access.",
-        "responses": { "200": { "description": "Pagina HTML", "content": { "text/html": {} } } }
-      }
-    },
-    "/admin/api/keys": {
-      "get": {
-        "summary": "Elenca le credenziali agente",
-        "security": [ { "adminSecret": [] } ],
-        "responses": {
-          "200": { "description": "Elenco", "content": { "application/json": { "schema": { "type": "object", "properties": { "keys": { "type": "array", "items": { "type": "object", "properties": {
-            "id": { "type": "string" }, "kind": { "type": "string", "enum": ["key", "session"] }, "label": { "type": "string" },
-            "quota": { "type": "integer" }, "used": { "type": "integer" }, "period": { "type": "string", "nullable": true },
-            "expires_at": { "type": "integer", "nullable": true }, "revoked": { "type": "integer" }, "created_at": { "type": "string" }
-          } } } } } } } },
-          "403": { "description": "X-Admin-Secret assente o errato" }
-        }
-      },
-      "post": {
-        "summary": "Emette una nuova API key",
-        "security": [ { "adminSecret": [] } ],
-        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "properties": {
-          "label": { "type": "string", "maxLength": 200 }, "quota": { "type": "integer", "minimum": 1 }
-        }, "required": ["label", "quota"] } } } },
-        "responses": {
-          "201": { "description": "Chiave emessa (mostrata una sola volta, mai più recuperabile)", "content": { "application/json": { "schema": { "type": "object", "properties": {
-            "id": { "type": "string" }, "key": { "type": "string", "example": "sg_k_<id>_<secret>" }, "label": { "type": "string" }, "quota": { "type": "integer" }
-          } } } } },
-          "400": { "description": "etichetta mancante o quota non valida" }, "403": { "description": "X-Admin-Secret assente o errato" }
-        }
-      }
-    },
-    "/admin/api/keys/{id}": {
-      "patch": {
-        "summary": "Revoca o modifica la quota di una credenziale",
-        "security": [ { "adminSecret": [] } ],
-        "parameters": [ { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "pattern": "^[0-9a-f]{8}$" } } ],
-        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "properties": {
-          "revoked": { "type": "boolean" }, "quota": { "type": "integer", "minimum": 1 }
-        } } } } },
-        "responses": {
-          "200": { "description": "Aggiornata" }, "400": { "description": "id o corpo non valido" }, "403": { "description": "X-Admin-Secret assente o errato" }
         }
       }
     }
