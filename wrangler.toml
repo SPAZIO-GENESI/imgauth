@@ -54,6 +54,12 @@ CERT_NOTIFY_EVERY = "1"
 # OAuth, che sono Cloudflare secrets — vedi CLAUDE.md § imgauth › Segreti).
 DEV_KEY_QUOTA = "50"
 
+# P22: client ID OAuth (pubblici per design — solo i client secret sono
+# Cloudflare secrets). Redirect URI registrati in FASE 0:
+# https://imgauth.spaziogenesi.org/api/dev/oauth/callback/<provider>
+GOOGLE_OAUTH_CLIENT_ID = "309187343194-vrk29hp8hiuhofom419qkl3hrqm01pk8.apps.googleusercontent.com"
+MS_OAUTH_CLIENT_ID = "1876aab5-0cb1-4bbd-acfe-7277f768e3d1"
+
 # Template PDF come ArrayBuffer (import in worker.js)
 [[rules]]
 type = "Data"
