@@ -30,6 +30,17 @@ Client di riferimento: [attest-mcp](https://github.com/SPAZIO-GENESI/attest-mcp)
 server MCP che espone il servizio agli agenti AI mantenendo la stessa full
 privacy del sito (hash calcolato in locale, mai i byte del file).
 
+### Chiave API self-service (dalla 1.19.0)
+
+Terza via di emissione della stessa `sg_k_…` (non un terzo tipo di
+credenziale): [`/developer/keys`](https://imgauth.spaziogenesi.org/developer/keys)
+emette una chiave in autonomia dopo aver verificato la tua email con un login
+**one-shot** Google o Microsoft (scope minimo `openid email` — non è un
+account, non lasciamo cookie né token del provider: una sola chiamata per
+leggere l'email, poi il token viene scartato). Quota 50 attestazioni/mese,
+un'email = una chiave attiva (chiedere a `it@spaziogenesi.org` per revoca o
+quote più alte). Le convenzioni con quote più alte restano manuali via email.
+
 ## Documentazione API
 
 Contratto completo in formato OpenAPI 3.0: [`/openapi.json`](https://imgauth.spaziogenesi.org/openapi.json)
