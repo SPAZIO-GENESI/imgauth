@@ -614,6 +614,8 @@ async function handleAgentToken(url, env) {
 
 // Spazzino righe scadute (device flow), agganciato al cron esistente: righe di
 // autorizzazione scadute e session token scaduti (le 'key' non scadono mai).
+// Dalla P22 FASE 2, anche: stato OAuth effimero scaduto e anonimizzazione del
+// titolare delle chiavi self-service revocate da oltre 180 giorni (§2.5).
 async function sweepExpiredAgentRows(env) {
   if (!env?.DB) return;
   const now = Date.now();
@@ -621,6 +623,12 @@ async function sweepExpiredAgentRows(env) {
     await env.DB.batch([
       env.DB.prepare(`DELETE FROM agent_authorizations WHERE expires_at < ?`).bind(now),
       env.DB.prepare(`DELETE FROM agent_credentials WHERE kind = 'session' AND expires_at IS NOT NULL AND expires_at < ?`).bind(now),
+      env.DB.prepare(`DELETE FROM dev_oauth_state WHERE expires_at < ?`).bind(now),
+      env.DB.prepare(
+        `UPDATE agent_credentials SET owner_email = '(rimosso)', owner_provider = NULL
+         WHERE owner_email IS NOT NULL AND owner_email != '(rimosso)'
+           AND revoked = 1 AND revoked_at IS NOT NULL AND revoked_at < ?`
+      ).bind(now - DEV_OWNER_RETENTION_MS),
     ]);
   } catch (e) {
     console.error("[agent sweep failed]", e?.message);
@@ -878,7 +886,8 @@ async function handleAdminKeysList(env) {
   if (!env?.DB) return jsonResponse({ error: "Servizio non disponibile." }, 503);
   try {
     const { results } = await env.DB.prepare(
-      `SELECT id, kind, label, quota, used, period, expires_at, revoked, created_at
+      `SELECT id, kind, label, quota, used, period, expires_at, revoked, created_at,
+              owner_email, owner_provider, revoked_at
        FROM agent_credentials ORDER BY created_at DESC`
     ).all();
     return jsonResponse({ keys: results || [] });
@@ -926,12 +935,29 @@ async function handleAdminKeysUpdate(request, env, id) {
   if (typeof body?.revoked === "boolean") {
     sets.push("revoked = ?");
     binds.push(body.revoked ? 1 : 0);
+    // revoked_at alimenta la retention email (P22 §2.5): valorizzato alla
+    // revoca, azzerato se mai riattivata (nessuna traccia di una revoca che
+    // non è più in vigore).
+    sets.push("revoked_at = ?");
+    binds.push(body.revoked ? Date.now() : null);
   }
   if (body?.quota !== undefined) {
     const q = Number(body.quota);
     if (!Number.isInteger(q) || q <= 0) return jsonResponse({ error: "Quota non valida." }, 400);
     sets.push("quota = ?");
     binds.push(q);
+  }
+  if (body?.forget === true) {
+    // Cancellazione GDPR immediata su richiesta dell'interessato, senza
+    // aspettare i 180 giorni di retention (P22 §2.5). Ammessa solo su una
+    // chiave già revocata (in questa stessa chiamata o in precedenza):
+    // altrimenti due chiavi "dimenticate" contemporaneamente attive
+    // collidono sull'indice UNIQUE parziale su owner_email.
+    const willBeRevoked = body?.revoked === true || (await env.DB.prepare(
+      `SELECT revoked FROM agent_credentials WHERE id = ?`
+    ).bind(id).first())?.revoked === 1;
+    if (!willBeRevoked) return jsonResponse({ error: "Revoca la chiave prima di dimenticare il titolare." }, 400);
+    sets.push("owner_email = '(rimosso)', owner_provider = NULL");
   }
   if (!sets.length) return jsonResponse({ error: "Nessuna modifica specificata." }, 400);
   binds.push(id);
@@ -1018,7 +1044,7 @@ function adminPageHtml() {
     <div class="card">
       <h2 style="font-size:1rem;margin:0 0 .8rem;">Credenziali esistenti <button class="secondary" id="refreshBtn" style="float:right;">Aggiorna</button></h2>
       <table>
-        <thead><tr><th>Etichetta</th><th>Tipo</th><th>Quota</th><th>Usate</th><th>Stato</th><th>Creata</th><th></th></tr></thead>
+        <thead><tr><th>Etichetta</th><th>Tipo</th><th>Titolare</th><th>Quota</th><th>Usate</th><th>Stato</th><th>Creata</th><th></th></tr></thead>
         <tbody id="keysBody"></tbody>
       </table>
       <p class="msg" id="listMsg"></p>
@@ -1071,21 +1097,34 @@ function adminPageHtml() {
     try { return new Date(iso).toLocaleString("it-IT", { dateStyle: "short", timeStyle: "short" }); } catch (e) { return iso; }
   }
 
+  function escHtml(s) {
+    return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
+
   function rowHtml(k) {
     var statusPill = k.revoked
       ? '<span class="pill revoked">revocata</span>'
       : '<span class="pill ok">attiva</span>';
     var kindLabel = k.kind === "key" ? "API key" : "sessione";
+    var owner = k.owner_email
+      ? escHtml(k.owner_email) + (k.owner_provider ? ' <span style="color:var(--muted);">(' + escHtml(k.owner_provider) + ')</span>' : '')
+      : '—';
     var actions = '';
     if (k.kind === "key") {
       actions += '<button class="secondary qty-btn" data-id="' + k.id + '" style="margin-right:.4rem;">Modifica quota</button>';
       if (!k.revoked) actions += '<button class="danger revoke-btn" data-id="' + k.id + '">Revoca</button>';
+      if (k.revoked && k.owner_email && k.owner_email !== "(rimosso)") {
+        actions += '<button class="secondary forget-btn" data-id="' + k.id + '" style="margin-left:.4rem;">Dimentica titolare</button>';
+      }
     } else if (!k.revoked) {
       actions += '<button class="danger revoke-btn" data-id="' + k.id + '">Revoca</button>';
     }
     return '<tr>' +
-      '<td>' + (k.label || '—') + '</td>' +
+      '<td>' + escHtml(k.label || '—') + '</td>' +
       '<td>' + kindLabel + '</td>' +
+      '<td>' + owner + '</td>' +
       '<td>' + k.quota + '</td>' +
       '<td>' + k.used + '</td>' +
       '<td>' + statusPill + '</td>' +
@@ -1114,6 +1153,13 @@ function adminPageHtml() {
           var q = prompt("Nuova quota mensile:");
           if (!q) return;
           api("/admin/api/keys/" + btn.dataset.id, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ quota: parseInt(q, 10) }) })
+            .then(loadKeys).catch(function (e) { listMsg.textContent = e.message; listMsg.className = "msg err"; });
+        });
+      });
+      Array.prototype.forEach.call(document.querySelectorAll(".forget-btn"), function (btn) {
+        btn.addEventListener("click", function () {
+          if (!confirm("Rimuovere l'email del titolare da questa credenziale? Non si può annullare.")) return;
+          api("/admin/api/keys/" + btn.dataset.id, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ forget: true }) })
             .then(loadKeys).catch(function (e) { listMsg.textContent = e.message; listMsg.className = "msg err"; });
         });
       });
