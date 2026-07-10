@@ -55,6 +55,19 @@ type = "Data"
 globs = ["**/*.pdf"]
 fallthrough = true
 
+# Swagger UI ufficiale (Apache-2.0) per /docs — nessun CDN di terze parti,
+# stesso principio già seguito per pdf.js. Serviti come Static Assets
+# (public/docs/*), NON tramite import in worker.js: importarli come modulo
+# "Text" (tentativo iniziale) produceva contenuto troncato/tipizzato male in
+# wrangler dev per file di questa dimensione (>250KB) — bug/limite del
+# loader, non del nostro codice. Gli asset statici hanno priorità sul Worker
+# per i path che combaciano (comportamento di default, nessun run_worker_first
+# necessario: /docs stesso resta gestito dal Worker perché non c'è un
+# index.html in public/docs/).
+[assets]
+directory = "public"
+binding = "ASSETS"
+
 # Copia archiviata: oggetti sotto pdf/<sha256>/certificato_<stamp>.pdf — l'hash
 # nel prefisso rende il certificato recuperabile via GET /api/cert?hash= (i
 # certificati pre-1.8.0, pdf/certificato_<stamp>.pdf, non sono indicizzati per hash).
