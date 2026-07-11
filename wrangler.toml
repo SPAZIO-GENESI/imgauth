@@ -117,3 +117,69 @@ namespace_id = "1002"
 binding = "DB"
 database_name = "imgauth-health"
 database_id = "6120b7af-bf22-43de-b1f8-e28163dc5df1"
+
+# ── Staging (P24) ─────────────────────────────────────────────────────────
+# Replica dell'ambiente di produzione per verifica pre-rilascio. Regole
+# vincolanti (vedi P24-DESIGN-devops-cicd.md):
+# - gli [env.*] di wrangler NON ereditano i binding top-level: TUTTO va
+#   ridichiarato qui sotto (D1, R2, assets, vars) — un binding dimenticato
+#   è il sintomo tipico di un 503/500 in staging (gotcha I2 del design doc);
+# - solo workers.dev, MAI una route su un dominio di zona (D2 — evita in
+#   radice la trappola wrangler-routes, vedi memoria imgauth-wrangler-routes-trap);
+# - nessun [env.staging.triggers]: i cron restano spenti (D10), niente
+#   rollup/notifiche doppie;
+# - SIGNER_URL assente di proposito: authart non è replicato in v1 (D7), lo
+#   staging emette PDF identici ma non firmati;
+# - GOOGLE/MS_OAUTH_CLIENT_ID assenti di proposito: il flusso self-service
+#   richiederebbe redirect URI dedicati non registrati (D2/limiti dichiarati
+#   in DEVOPS.md) — i bottoni di /developer/keys restano assenti, fail-closed.
+[env.staging]
+name = "imgauth-staging"
+workers_dev = true
+
+# ⚠️ Scoperto al primo deploy staging (2026-07-11): a differenza di vars/D1/R2,
+# [triggers] NON è tra i blocchi che richiedono ridichiarazione per essere
+# attivi — VIENE EREDITATO dal top-level se non sovrascritto esplicitamente
+# (il primo deploy ha silenziosamente attivato il cron */30 su staging,
+# contro D10). Override esplicito a vuoto per disattivarlo.
+[env.staging.triggers]
+crons = []
+
+[env.staging.vars]
+CERT_NOTIFY_EVERY = "0"
+DEV_KEY_QUOTA = "50"
+# Nessun frontend di staging ancora (FASE 7): finché non esiste, l'origin è
+# il worker di staging stesso — sufficiente per gli smoke via curl/script.
+ALLOWED_ORIGIN = "https://imgauth-staging.it-e3f.workers.dev"
+
+[[env.staging.d1_databases]]
+binding = "DB"
+database_name = "imgauth-health-staging"
+database_id = "6c1b9e4f-a612-4843-86f6-83f86cccee44"
+
+[[env.staging.r2_buckets]]
+binding = "PDF_ARCHIVE"
+bucket_name = "imgauth-pdf-archive-staging"
+jurisdiction = "eu"
+
+[env.staging.assets]
+directory = "public"
+binding = "ASSETS"
+
+# Rate limit di staging: namespace_id DIVERSI dalla produzione (1001/1002) per
+# evitare qualunque ambiguità nel dashboard, stessi limiti. Se l'account non
+# permettesse binding duplicati per-env, il codice è già fail-open (nessun
+# blocco) — annotato come limite noto in DEVOPS.md.
+[[env.staging.ratelimits]]
+name = "RL_CERT"
+namespace_id = "2001"
+  [env.staging.ratelimits.simple]
+  limit = 10
+  period = 60
+
+[[env.staging.ratelimits]]
+name = "RL_API"
+namespace_id = "2002"
+  [env.staging.ratelimits.simple]
+  limit = 60
+  period = 60
