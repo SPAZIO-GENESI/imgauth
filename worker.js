@@ -1709,14 +1709,27 @@ async function handlePdf(request, env, ctx) {
     if (env?.SIGNER_URL) {
       const signHeaders = { "Content-Type": "application/pdf" };
       if (env?.SIGN_SECRET) signHeaders["X-Sign-Secret"] = env.SIGN_SECRET;
-      const signRes = await fetch(env.SIGNER_URL, {
+      // Timeout esplicito (a differenza dell'health check, qui una connessione
+      // che resta appesa durante un riavvio Azure non deve lasciare l'utente
+      // in attesa indefinita): 20s, generoso per un cold-start reale ma limitato.
+      const signRes = await fetchWithTimeout(env.SIGNER_URL, 20000, {
         method: "POST",
         headers: signHeaders,
         body: pdfBytes,
       });
-      if (!signRes.ok) {
-        const msg = await signRes.text().catch(() => signRes.status);
-        return jsonResponse({ error: `Errore firma crittografica: ${msg}` }, 502);
+      if (!signRes || !signRes.ok) {
+        // Non propagare mai il corpo grezzo di authart al client: durante un
+        // deploy Azure (redeploy, riavvio, cold-start rotto) può essere una
+        // pagina HTML della piattaforma o un traceback interno — incomprensibile
+        // e potenzialmente rumoroso. Il dettaglio resta nei log del Worker
+        // (visibile via wrangler tail), il chiamante vede solo un messaggio
+        // onesto e azionabile. 503 (non 502): l'invito è "riprova", non un
+        // errore del client.
+        const msg = signRes ? await signRes.text().catch(() => String(signRes.status)) : "nessuna risposta (timeout o connessione rifiutata)";
+        console.error("[signer error]", signRes ? signRes.status : "no-response", msg.slice(0, 500));
+        return jsonResponse({
+          error: "Firma del certificato temporaneamente non disponibile (aggiornamento della piattaforma in corso). Riprova tra qualche minuto.",
+        }, 503);
       }
       finalBytes = new Uint8Array(await signRes.arrayBuffer());
     }
