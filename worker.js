@@ -48,6 +48,14 @@ const MONTHS_IT = [
 
 const ALLOWED_ORIGIN = "https://attestazione.spaziogenesi.org";
 
+// Origin CORS effettivo per la richiesta corrente (P24: multi-ambiente).
+// Di default coincide con ALLOWED_ORIGIN (produzione, comportamento invariato
+// senza la var); in staging env.ALLOWED_ORIGIN punta al frontend di staging.
+// Valorizzato a inizio fetch() — corsHeaders() legge questa variabile invece
+// della costante, così i tanti punti che la chiamano senza argomenti restano
+// invariati.
+let activeAllowedOrigin = ALLOWED_ORIGIN;
+
 // Base pubblica della pagina "certificato verificabile online" (vedi handleCertPage)
 // e dominio su cui vivono gli endpoint /api/* (download PDF, prova .ots, badge).
 // La pagina /c/<sha256> è renderizzata dal Worker e va montata su
@@ -115,7 +123,7 @@ const DEV_PROVIDERS = {
 
 function corsHeaders() {
   return {
-    "Access-Control-Allow-Origin": ALLOWED_ORIGIN,
+    "Access-Control-Allow-Origin": activeAllowedOrigin,
     "Access-Control-Allow-Methods": "POST, GET, PATCH, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, X-Admin-Secret",
     "Access-Control-Max-Age": "86400",
@@ -1256,6 +1264,10 @@ window.onload = function () {
 
 export default {
   async fetch(request, env, ctx) {
+    // P24: origin CORS per ambiente (staging usa env.ALLOWED_ORIGIN; produzione,
+    // senza la var, resta identica alla costante — vedi definizione sopra).
+    activeAllowedOrigin = env?.ALLOWED_ORIGIN || ALLOWED_ORIGIN;
+
     const method = request.method.toUpperCase();
     const url    = new URL(request.url);
     const path   = url.pathname;
