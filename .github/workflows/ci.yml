@@ -1,12 +1,14 @@
 # Catena di rilascio (P24): check automatici su ogni PR; su merge in main lo
-# staging si aggiorna da solo e viene verificato con uno smoke test. La
-# produzione NON è toccata da questo workflow (vedi FASE 4 del design doc
-# per il gate di approvazione — job separato, ancora da introdurre).
+# staging si aggiorna da solo e viene verificato con uno smoke test; infine
+# la produzione riceve la stessa versione SOLO dopo approvazione umana
+# (GitHub Environment "production", required reviewer — FASE 4).
 #
 # Richiede due secret/variabili di repo (Settings → Secrets and variables →
 # Actions), creati alla FASE 3 di P24-DESIGN-devops-cicd.md:
 #   CLOUDFLARE_API_TOKEN   secret — template "Edit Cloudflare Workers"
 #   CLOUDFLARE_ACCOUNT_ID  variable — non sensibile
+# e l'Environment "production" (Settings → Environments) con Required
+# reviewers, creato alla FASE 4.
 
 name: CI
 
@@ -67,3 +69,54 @@ jobs:
         run: node scripts/smoke-staging.mjs
         env:
           STAGING_URL: https://imgauth-staging.it-e3f.workers.dev
+
+  # Gate umano: questo job resta IN ATTESA finché un required reviewer
+  # dell'Environment "production" non approva dall'interfaccia GitHub —
+  # nessuno step qui sotto parte prima dell'approvazione. Un solo job
+  # (upload + promozione insieme) è la scelta v1 del design doc: un secondo
+  # gate tra upload e promozione sarebbe un raffinamento successivo, non
+  # necessario adesso. `versions upload` carica la nuova versione a 0%
+  # traffico (non tocca subito la produzione); solo `versions deploy` la
+  # promuove al 100% — entrambi i passi avvengono DOPO l'approvazione.
+  deploy-production:
+    needs: deploy-staging
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Upload versione (0% traffico) e promozione al 100%
+        run: |
+          set -e
+          UPLOAD_LOG=$(npx wrangler versions upload --message "CI ${{ github.sha }}")
+          echo "$UPLOAD_LOG"
+          VERSION_ID=$(echo "$UPLOAD_LOG" | node -e "
+            let d='';process.stdin.on('data',c=>d+=c);
+            process.stdin.on('end',()=>{
+              const m = d.match(/^Worker Version ID: (\S+)/m);
+              if (!m) { console.error('Version ID non trovato nell\'output di versions upload'); process.exit(1); }
+              console.log(m[1]);
+            });
+          ")
+          echo "Version ID: $VERSION_ID"
+          npx wrangler versions deploy "$VERSION_ID@100" --yes --message "Promozione dopo approvazione (${{ github.sha }})"
+      - name: Smoke test produzione (sola lettura — mai attestazioni reali automatiche)
+        run: |
+          set -e
+          PING=$(curl -sf https://imgauth.spaziogenesi.org/ping)
+          echo "$PING"
+          echo "$PING" | node -e "
+            let d='';process.stdin.on('data',c=>d+=c);
+            process.stdin.on('end',()=>{
+              const j = JSON.parse(d);
+              if (!j.ok) { console.error('/ping non ok'); process.exit(1); }
+              console.log('produzione ok, versione', j.version);
+            });
+          "
