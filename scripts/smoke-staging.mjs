@@ -1,3 +1,6 @@
+// PR di prova P24 FASE 3: verifica che il job "check" giri su questa pull
+// request prima del merge (nessun cambio funzionale).
+//
 // Smoke test dell'ambiente di staging (P24 FASE 2/3). Ripete i criteri di
 // accettazione della FASE 2 (vedi P24-DESIGN-devops-cicd.md): ping, status,
 // giro completo hash → cert-pdf → recupero. Esce non-zero al primo fallimento.
