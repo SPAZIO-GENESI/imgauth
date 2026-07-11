@@ -148,9 +148,12 @@ crons = []
 [env.staging.vars]
 CERT_NOTIFY_EVERY = "0"
 DEV_KEY_QUOTA = "50"
-# Nessun frontend di staging ancora (FASE 7): finché non esiste, l'origin è
-# il worker di staging stesso — sufficiente per gli smoke via curl/script.
-ALLOWED_ORIGIN = "https://imgauth-staging.it-e3f.workers.dev"
+# Frontend di staging (P24 FASE 7): repo Pages secondario attestazione-staging,
+# pubblicato da imgauthweb via branch `staging` (.github/workflows/deploy-staging.yml).
+# Prima della FASE 7 era il worker stesso (nessun frontend esisteva ancora) —
+# ora deve combaciare con l'origin reale che chiama /api/hash da browser, o il
+# preflight CORS fallisce silenziosamente per l'utente.
+ALLOWED_ORIGIN = "https://spazio-genesi.github.io"
 
 [[env.staging.d1_databases]]
 binding = "DB"
