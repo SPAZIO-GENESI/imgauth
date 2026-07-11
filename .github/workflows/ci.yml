@@ -12,10 +12,21 @@
 
 name: CI
 
+# Filtro path: un commit di sola documentazione (*.md, docs/**) non fa
+# scattare check/staging/gate di produzione — nessun codice cambia, non
+# c'è nulla da verificare o rilasciare. Aggiunto dopo aver notato che un
+# push di docs/DEVOPS.md avrebbe altrimenti richiesto un'approvazione a
+# vuoto sull'Environment "production" (P24 FASE 8).
 on:
   pull_request:
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
   push:
     branches: [main]
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
 
 concurrency:
   group: ci-${{ github.ref }}
