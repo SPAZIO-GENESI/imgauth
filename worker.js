@@ -2688,3 +2688,4 @@ async function notifyCertProduced(env, sha256, meta, tsHuman) {
   } catch { /* notifica best-effort */ }
 }
 
+const brokenSyntaxTestP24 = {
