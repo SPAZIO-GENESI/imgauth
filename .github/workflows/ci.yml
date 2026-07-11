@@ -31,8 +31,18 @@ jobs:
         with:
           node-version: 20
       - run: npm ci
+      # `node --check worker.js` (file .js, niente "type":"module" in
+      # package.json) NON è affidabile qui: worker.js usa import/export
+      # (sintassi ESM) e l'euristica di auto-detect di Node, una volta
+      # riconosciuta la sintassi ESM dopo il fallimento del parse CJS,
+      # interrompe la validazione senza controllare il resto del file —
+      # scoperto durante il collaudo di questo stesso workflow (P24 FASE 3):
+      # un errore di sintassi iniettato ad arte alla fine del file passava
+      # silenziosamente questo step (veniva poi preso, per caso, dal
+      # dry-run wrangler/esbuild sotto). Forzare l'input-type=module via
+      # stdin fa usare il parser ESM per l'intero file, senza ambiguità.
       - name: Sintassi worker.js
-        run: node --check worker.js
+        run: node --input-type=module --check < worker.js
       - name: Contratto OpenAPI valido
         run: node -e "JSON.parse(require('fs').readFileSync('openapi.json','utf8'))"
       - name: Build dry-run (produzione)
