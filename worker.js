@@ -117,6 +117,18 @@ const DEV_PROVIDERS = {
     clientIdVar: "MS_OAUTH_CLIENT_ID",
     clientSecretVar: "MS_OAUTH_CLIENT_SECRET",
   },
+  // LinkedIn ("Sign In with LinkedIn using OpenID Connect"): il prodotto
+  // concede insieme openid+profile+email, va richiesto lo scope completo
+  // (un sottoinsieme rischia invalid_scope) anche se ci serve solo l'email.
+  linkedin: {
+    label: "LinkedIn",
+    authorizeUrl: "https://www.linkedin.com/oauth/v2/authorization",
+    tokenUrl: "https://www.linkedin.com/oauth/v2/accessToken",
+    userinfoUrl: "https://api.linkedin.com/v2/userinfo",
+    clientIdVar: "LINKEDIN_OAUTH_CLIENT_ID",
+    clientSecretVar: "LINKEDIN_OAUTH_CLIENT_SECRET",
+    scope: "openid profile email",
+  },
 };
 
 // ── Helpers CORS ────────────────────────────────────────────────────────────
@@ -674,7 +686,7 @@ function devKeysPageHtml(env) {
   return certPageShell("Chiave API sviluppatori", body);
 }
 
-// GET /api/dev/oauth/start?provider=google|microsoft — apre lo state anti-CSRF
+// GET /api/dev/oauth/start?provider=google|microsoft|linkedin — apre lo state anti-CSRF
 // (riga effimera in D1, nessun nuovo segreto di firma: lo state È il record)
 // e reindirizza all'authorize URL del provider.
 async function handleDevOAuthStart(url, env) {
@@ -702,7 +714,7 @@ async function handleDevOAuthStart(url, env) {
   authUrl.searchParams.set("client_id", clientId);
   authUrl.searchParams.set("redirect_uri", redirectUri);
   authUrl.searchParams.set("response_type", "code");
-  authUrl.searchParams.set("scope", "openid email");
+  authUrl.searchParams.set("scope", cfg.scope || "openid email");
   authUrl.searchParams.set("state", state);
   authUrl.searchParams.set("prompt", "select_account");
   return Response.redirect(authUrl.toString(), 302);
@@ -814,9 +826,9 @@ async function handleDevOAuthCallback(url, provider, env, ctx) {
   // Da qui in poi accessToken/tokenJson/userJson non sono più referenziati:
   // niente store, niente log (invariante 4 del design).
 
-  if (provider === "google" && userJson?.email_verified === false) {
+  if ((provider === "google" || provider === "linkedin") && userJson?.email_verified === false) {
     return htmlResponse(certPageShell("Email non verificata",
-      `<p class="lead">Il tuo account Google non ha un'email verificata. Usa un altro account o l'altro provider.</p>`), 403);
+      `<p class="lead">Il tuo account ${escHtml(cfg.label)} non ha un'email verificata. Usa un altro account o un altro provider.</p>`), 403);
   }
   const rawEmail = userJson?.email;
   if (!rawEmail || typeof rawEmail !== "string") {
