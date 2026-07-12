@@ -1514,8 +1514,11 @@ function adminPageHtml() {
     document.getElementById("tabBtnConventions").classList.toggle("active", !isKeys);
     document.getElementById("tabBtnConventions").setAttribute("aria-selected", String(!isKeys));
   }
-  document.getElementById("tabBtnKeys").addEventListener("click", function () { showTab("keys"); });
-  document.getElementById("tabBtnConventions").addEventListener("click", function () { showTab("conventions"); });
+  // Ogni apertura di scheda ricarica i dati: chi guarda il pannello non deve
+  // sapere che esiste un pulsante "Aggiorna" dedicato per vedere lo stato
+  // corrente (es. dopo un'attestazione fatta altrove, come dal sito).
+  document.getElementById("tabBtnKeys").addEventListener("click", function () { showTab("keys"); loadKeys(); });
+  document.getElementById("tabBtnConventions").addEventListener("click", function () { showTab("conventions"); loadConventions(); });
 
   function fmtDate(iso) {
     if (!iso) return "—";
