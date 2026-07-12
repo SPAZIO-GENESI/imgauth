@@ -95,6 +95,11 @@ const DEV_OAUTH_STATE_TTL_MS  = 10 * 60 * 1000;             // 10 minuti, stato 
 const DEV_KEY_QUOTA_DEFAULT   = 50;                          // attestazioni/mese
 const DEV_OWNER_RETENTION_MS  = 180 * 24 * 60 * 60 * 1000;   // 180 giorni post-revoca (FASE 2)
 
+// ── "Attesta con la tua email" — voucher stateless dal sito (P25 §2.7) ──────
+// TTL del voucher firmato (fragment #sgv=, sessionStorage lato authweb, mai
+// un cookie né una riga D1): 8 ore, come da design.
+const VOUCHER_TTL_MS = 8 * 60 * 60 * 1000;
+
 // Endpoint OAuth "verifica email one-shot" (authorization code, scope openid
 // email): niente login/sessione, l'access token si usa per UNA chiamata a
 // userinfo e si scarta (vedi invariante 4 nel design). clientIdVar/clientSecretVar
@@ -137,7 +142,7 @@ function corsHeaders() {
   return {
     "Access-Control-Allow-Origin": activeAllowedOrigin,
     "Access-Control-Allow-Methods": "POST, GET, PATCH, DELETE, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, X-Admin-Secret",
+    "Access-Control-Allow-Headers": "Content-Type, X-Admin-Secret, X-SG-Voucher",
     "Access-Control-Max-Age": "86400",
   };
 }
@@ -292,6 +297,23 @@ function randomBase64Url(bytes) {
   let bin = "";
   for (const b of buf) bin += String.fromCharCode(b);
   return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+// Bytes arbitrari → base64url (senza padding): usato per il payload del
+// voucher (P25 §2.7), che deve viaggiare in un fragment URL senza bisogno
+// di ulteriore escaping.
+function bytesToBase64Url(bytes) {
+  let bin = "";
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function base64UrlToBytes(b64url) {
+  const b64 = b64url.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((b64url.length + 3) % 4);
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
 }
 
 // Invio Telegram best-effort (fail-safe: un errore qui non deve mai propagarsi).
@@ -690,11 +712,15 @@ function devKeysPageHtml(env) {
   return certPageShell("Chiave API sviluppatori", body);
 }
 
-// GET /api/dev/oauth/start?provider=google|microsoft|linkedin — apre lo state anti-CSRF
-// (riga effimera in D1, nessun nuovo segreto di firma: lo state È il record)
-// e reindirizza all'authorize URL del provider.
+// GET /api/dev/oauth/start?provider=google|microsoft|linkedin[&purpose=attest]
+// — apre lo state anti-CSRF (riga effimera in D1, nessun nuovo segreto di
+// firma: lo state È il record) e reindirizza all'authorize URL del provider.
+// purpose='key' (default, P22) emette una chiave sg_k_…; purpose='attest'
+// (P25 §2.7) non tocca agent_credentials, emette solo un voucher stateless
+// nel fragment (vedi handleDevOAuthCallback).
 async function handleDevOAuthStart(url, env) {
   const provider = url.searchParams.get("provider") || "";
+  const purpose  = url.searchParams.get("purpose") === "attest" ? "attest" : "key";
   const cfg = DEV_PROVIDERS[provider];
   if (!cfg) return jsonResponse({ error: "Provider non valido." }, 400);
   const clientId = env?.[cfg.clientIdVar];
@@ -707,8 +733,8 @@ async function handleDevOAuthStart(url, env) {
   const now = Date.now();
   try {
     await env.DB.prepare(
-      `INSERT INTO dev_oauth_state (state, provider, created_at, expires_at) VALUES (?, ?, ?, ?)`
-    ).bind(state, provider, now, now + DEV_OAUTH_STATE_TTL_MS).run();
+      `INSERT INTO dev_oauth_state (state, provider, purpose, created_at, expires_at) VALUES (?, ?, ?, ?, ?)`
+    ).bind(state, provider, purpose, now, now + DEV_OAUTH_STATE_TTL_MS).run();
   } catch {
     return jsonResponse({ error: "Errore interno." }, 500);
   }
@@ -778,6 +804,90 @@ async function matchConvention(env, email) {
   return null;
 }
 
+// P25 (C): voucher stateless "attesta con la tua email" (§2.7). Formato
+// `base64url(JSON{email,conv,exp}) + '.' + HMAC-SHA256(HMAC_SECRET,'VOUCHER:'+payload)`
+// — riuso del segreto esistente con prefisso di dominio 'VOUCHER:', così un
+// voucher non è mai confondibile con un token di attestazione (stesso pattern
+// del messaggio "SHA-256:<hash>@<ts>"). `conv` è solo un HINT preso al momento
+// dell'emissione: NON è fonte di verità (va sempre riletto da D1, vedi
+// verifyVoucher/matchConvention in handleHash).
+async function buildVoucher(env, email, convention) {
+  const payload = { email, conv: convention ? convention.id : null, exp: Date.now() + VOUCHER_TTL_MS };
+  const payloadB64 = bytesToBase64Url(new TextEncoder().encode(JSON.stringify(payload)));
+  const sig = await signHmac(env.HMAC_SECRET, `VOUCHER:${payloadB64}`);
+  return `${payloadB64}.${sig}`;
+}
+
+// Verifica firma + scadenza di un voucher. null = assente/manomesso/scaduto.
+// Non dice nulla sullo stato attuale della convenzione: il chiamante deve
+// rileggerla da D1 (matchConvention) prima di applicarne i vantaggi.
+async function verifyVoucher(env, token) {
+  if (!env?.HMAC_SECRET || typeof token !== "string") return null;
+  const dot = token.lastIndexOf(".");
+  if (dot < 0) return null;
+  const payloadB64 = token.slice(0, dot);
+  const sig = token.slice(dot + 1);
+  let payload;
+  try {
+    payload = JSON.parse(new TextDecoder().decode(base64UrlToBytes(payloadB64)));
+  } catch {
+    return null;
+  }
+  if (!payload || typeof payload.email !== "string" || !Number.isFinite(payload.exp)) return null;
+  let valid;
+  try {
+    valid = await verifyHmac(env.HMAC_SECRET, `VOUCHER:${payloadB64}`, sig);
+  } catch {
+    return null;
+  }
+  if (!valid || Date.now() > payload.exp) return null;
+  return payload; // { email, conv, exp }
+}
+
+// P25 (B)+(C): contabilità pool/tetto individuale di una convenzione, condivisa
+// fra i due canali di emissione — chiave API (`via:'key'`, credentialId = id
+// della sg_k_…) e voucher dal sito (`via:'site'`, credentialId = null, nessuna
+// riga in agent_credentials). Mai un blocco: pool o tetto esauriti degradano
+// silenziosamente a fascia Base con motivo esplicito (vedi §1/§2.4 design).
+// Ritorna { fascia: null, ... } se conventionId è assente/la convenzione non
+// esiste più (D1 cancellata a mano) — il chiamante mantiene il proprio default.
+async function accountConventionUsage(env, ctx, { conventionId, memberEmail, credentialId, via, sha256 }) {
+  if (!conventionId || !env?.DB) return { fascia: null, fasciaMotivo: null, convenzioneInfo: null };
+  const ym = dayRome().slice(0, 7); // 'YYYY-MM' Europe/Rome
+  try {
+    const conv = await env.DB.prepare(
+      `SELECT id, name, monthly_quota, member_cap FROM conventions WHERE id = ?`
+    ).bind(conventionId).first();
+    if (!conv) return { fascia: null, fasciaMotivo: null, convenzioneInfo: null };
+
+    const poolRow = await env.DB.prepare(
+      `SELECT COUNT(*) AS c FROM convention_attestations WHERE convention_id = ? AND ym = ?`
+    ).bind(conv.id, ym).first();
+    const poolUsed = poolRow?.c || 0;
+
+    let fasciaMotivo = null;
+    if (poolUsed >= conv.monthly_quota) {
+      fasciaMotivo = "pool_esaurito";
+    } else if (conv.member_cap > 0) {
+      const capRow = await env.DB.prepare(
+        `SELECT COUNT(*) AS c FROM convention_attestations WHERE convention_id = ? AND member_email = ? AND ym = ?`
+      ).bind(conv.id, memberEmail, ym).first();
+      if ((capRow?.c || 0) >= conv.member_cap) fasciaMotivo = "tetto_individuale";
+    }
+    if (fasciaMotivo) return { fascia: "base", fasciaMotivo, convenzioneInfo: null };
+
+    if (ctx && typeof ctx.waitUntil === "function") {
+      ctx.waitUntil(env.DB.prepare(
+        `INSERT INTO convention_attestations (convention_id, member_email, credential_id, via, sha256, ym, ts)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
+      ).bind(conv.id, memberEmail, credentialId || null, via, sha256, ym, Date.now()).run().catch(() => {}));
+    }
+    return { fascia: "convenzione", fasciaMotivo: null, convenzioneInfo: { id: conv.id, name: conv.name } };
+  } catch {
+    return { fascia: null, fasciaMotivo: null, convenzioneInfo: null }; // fail-open
+  }
+}
+
 // GET /api/dev/oauth/callback/<provider>?code=&state= — scambia il code,
 // legge l'email verificata da userinfo e scarta il token, poi emette (o
 // rifiuta se già esiste) la chiave sg_k_… per quell'email.
@@ -811,7 +921,7 @@ async function handleDevOAuthCallback(url, provider, env, ctx) {
   // riusi (replay) trova la riga già sparita.
   let stateRow;
   try {
-    stateRow = await env.DB.prepare(`SELECT provider, expires_at FROM dev_oauth_state WHERE state = ?`).bind(state).first();
+    stateRow = await env.DB.prepare(`SELECT provider, expires_at, purpose FROM dev_oauth_state WHERE state = ?`).bind(state).first();
     if (stateRow) await env.DB.prepare(`DELETE FROM dev_oauth_state WHERE state = ?`).bind(state).run();
   } catch {
     return htmlResponse(certPageShell("Errore", `<p class="lead">Errore interno. Riprova.</p>`), 500);
@@ -872,6 +982,25 @@ async function handleDevOAuthCallback(url, provider, env, ctx) {
       `<p class="lead">Il tuo account non espone un indirizzo email leggibile. Prova con l'altro provider.</p>`), 403);
   }
   const email = rawEmail.trim().toLowerCase();
+
+  // P25 (C): percorso "attesta con la tua email" dal sito (§2.7) — stessa
+  // barriera OAuth di sopra (email verificata), ma nessuna chiave: solo un
+  // voucher stateless che authweb allega su /api/hash. Il token/l'email non
+  // sono mai persistiti oltre questo punto (invariante 2 del design).
+  if (stateRow.purpose === "attest") {
+    if (!env?.HMAC_SECRET) {
+      return htmlResponse(certPageShell("Servizio non disponibile",
+        `<p class="lead">Questo percorso non è al momento disponibile. Riprova più tardi.</p>`), 503);
+    }
+    const convention = await matchConvention(env, email);
+    let voucher;
+    try {
+      voucher = await buildVoucher(env, email, convention);
+    } catch {
+      return htmlResponse(certPageShell("Errore", `<p class="lead">Errore interno. Riprova.</p>`), 500);
+    }
+    return Response.redirect(`${CERT_PAGE_BASE}/#sgv=${encodeURIComponent(voucher)}`, 302);
+  }
 
   let existing;
   try {
@@ -1262,6 +1391,7 @@ function adminPageHtml() {
     <label for="secretInput">Admin secret</label>
     <div class="row">
       <div><input type="password" id="secretInput" placeholder="X-Admin-Secret" autocomplete="off"></div>
+      <div style="flex:0 0 auto;"><button class="secondary" id="toggleSecretBtn" type="button">Mostra</button></div>
       <div style="flex:0 0 auto;"><button id="loginBtn">Entra</button></div>
     </div>
     <p class="msg" id="loginMsg"></p>
@@ -1461,7 +1591,7 @@ function adminPageHtml() {
       });
       Array.prototype.forEach.call(document.querySelectorAll(".delete-btn"), function (btn) {
         btn.addEventListener("click", function () {
-          if (!confirm("Eliminare DEFINITIVAMENTE la credenziale \"" + btn.dataset.label + "\"? A differenza di \"Revoca\", non si può annullare.")) return;
+          if (!confirm('Eliminare DEFINITIVAMENTE la credenziale ' + btn.dataset.label + '? A differenza di Revoca, non si può annullare.')) return;
           api("/admin/api/keys/" + btn.dataset.id, { method: "DELETE" })
             .then(loadKeys).catch(function (e) { listMsg.textContent = e.message; listMsg.className = "msg err"; });
         });
@@ -1479,6 +1609,13 @@ function adminPageHtml() {
       if (e.message === "unauthorized") return;
       loginMsg.textContent = e.message; loginMsg.className = "msg err";
     });
+  });
+
+  document.getElementById("toggleSecretBtn").addEventListener("click", function () {
+    var input = document.getElementById("secretInput");
+    var showing = input.type === "text";
+    input.type = showing ? "password" : "text";
+    this.textContent = showing ? "Mostra" : "Nascondi";
   });
 
   document.getElementById("refreshBtn").addEventListener("click", function (e) { e.preventDefault(); loadKeys(); });
@@ -1773,13 +1910,36 @@ async function handleHash(request, env, ctx) {
       return jsonResponse({ error: agentAuth.error }, agentAuth.status);
     }
 
+    // ── Voucher "attesta con la tua email" (P25 §2.7, solo se non c'è già un
+    // bearer valido) ────────────────────────────────────────────────────────
+    // Stesso principio di bypass delle credenziali agente: l'OAuth one-shot è
+    // una barriera più forte del Turnstile. Header presente ma non valido
+    // (firma rotta o scaduto) → fail-closed, mai un fallback silenzioso al
+    // percorso Turnstile (coerente con l'invariante 1 del design P21/P25).
+    let voucherAuth = null;
+    if (!agentAuth) {
+      const voucherToken = request.headers.get("X-SG-Voucher") || "";
+      if (voucherToken) {
+        const payload = await verifyVoucher(env, voucherToken);
+        if (!payload) {
+          return jsonResponse({ error: "voucher_scaduto" }, 403);
+        }
+        // Il voucher NON è fonte di verità sullo stato della convenzione:
+        // rilettura fresca da D1 a ogni uso (può essere stata disattivata
+        // dopo l'emissione del voucher).
+        const conv = await matchConvention(env, payload.email);
+        voucherAuth = { email: payload.email, conventionId: conv ? conv.id : null };
+      }
+    }
+
     // ── Anti-bot Turnstile ─────────────────────────────────────────────────────
     // La challenge è qui, all'emissione dell'attestazione: nessun token HMAC viene
     // rilasciato (né per il .txt né per il PDF) senza un umano verificato — o,
-    // dalla P21, senza una credenziale agente valida (agentAuth.ok).
+    // dalla P21, senza una credenziale agente valida (agentAuth.ok), o dalla
+    // P25, senza un voucher email valido (voucherAuth).
     // Fail-open se siteverify è irraggiungibile: è l'endpoint primario e un
     // disservizio Turnstile non deve impedire il calcolo dell'hash.
-    if (!agentAuth && env?.TURNSTILE_SECRET) {
+    if (!agentAuth && !voucherAuth && env?.TURNSTILE_SECRET) {
       const tsToken = String(data.turnstile_token ?? "");
       if (!tsToken) {
         return jsonResponse({ error: "Verifica anti-bot mancante." }, 400);
@@ -1849,50 +2009,51 @@ async function handleHash(request, env, ctx) {
       hmacSig = await signHmac(env.HMAC_SECRET, hmacMessage(attestazione, meta));
     }
 
-    // ── P25 (B): fascia + contabilità convenzione ───────────────────────────
+    // ── P25 (B)+(C): fascia + contabilità convenzione ───────────────────────
     // Stessa timing della quota individuale (authenticateAgent): l'emissione
     // dell'attestazione è il momento in cui il "consumo" avviene, non la
-    // successiva generazione del PDF. Nessuna credenziale → fascia Base
-    // (percorso anonimo); credenziale senza convenzione → Sviluppatore;
-    // credenziale con convenzione → pool/tetto individuale, mai un blocco:
-    // esaurito uno dei due argini, l'emissione degrada silenziosamente a
-    // Base con motivo esplicito (mai negata, vedi §1 del design).
-    let fascia = agentAuth && agentAuth.ok ? "sviluppatore" : "base";
+    // successiva generazione del PDF. Nessuna credenziale/voucher → fascia
+    // Base (percorso anonimo); chiave senza convenzione → Sviluppatore;
+    // voucher senza convenzione → Base (nessun vantaggio proprio, il canale
+    // da solo non dà fascia — vedi §2.7 design); chiave O voucher con
+    // convenzione → pool/tetto individuale via accountConventionUsage, mai
+    // un blocco: esaurito uno dei due argini, l'emissione degrada
+    // silenziosamente a Base con motivo esplicito (mai negata, vedi §1).
+    let fascia = "base";
     let fasciaMotivo = null;
     let convenzioneInfo = null;
-    if (agentAuth && agentAuth.ok && agentAuth.conventionId && env?.DB) {
-      const ym = dayRome().slice(0, 7); // 'YYYY-MM' Europe/Rome
-      try {
-        const conv = await env.DB.prepare(
-          `SELECT id, name, monthly_quota, member_cap FROM conventions WHERE id = ?`
-        ).bind(agentAuth.conventionId).first();
-        if (conv) {
-          const poolRow = await env.DB.prepare(
-            `SELECT COUNT(*) AS c FROM convention_attestations WHERE convention_id = ? AND ym = ?`
-          ).bind(conv.id, ym).first();
-          const poolUsed = poolRow?.c || 0;
-          if (poolUsed >= conv.monthly_quota) {
-            fasciaMotivo = "pool_esaurito";
-          } else if (conv.member_cap > 0) {
-            const capRow = await env.DB.prepare(
-              `SELECT COUNT(*) AS c FROM convention_attestations WHERE convention_id = ? AND member_email = ? AND ym = ?`
-            ).bind(conv.id, agentAuth.ownerEmail, ym).first();
-            if ((capRow?.c || 0) >= conv.member_cap) fasciaMotivo = "tetto_individuale";
-          }
-          if (!fasciaMotivo) {
-            fascia = "convenzione";
-            convenzioneInfo = { id: conv.id, name: conv.name };
-            if (ctx && typeof ctx.waitUntil === "function") {
-              ctx.waitUntil(env.DB.prepare(
-                `INSERT INTO convention_attestations (convention_id, member_email, credential_id, via, sha256, ym, ts)
-                 VALUES (?, ?, ?, 'key', ?, ?, ?)`
-              ).bind(conv.id, agentAuth.ownerEmail, agentAuth.id, digest, ym, Date.now()).run().catch(() => {}));
-            }
-          } else {
-            fascia = "base"; // degrado esplicito: niente tag, niente log
-          }
+    if (agentAuth && agentAuth.ok) {
+      fascia = "sviluppatore";
+      if (agentAuth.conventionId) {
+        const acc = await accountConventionUsage(env, ctx, {
+          conventionId: agentAuth.conventionId,
+          memberEmail:  agentAuth.ownerEmail,
+          credentialId: agentAuth.id,
+          via:          "key",
+          sha256:       digest,
+        });
+        if (acc.fascia) {
+          fascia = acc.fascia;
+          fasciaMotivo = acc.fasciaMotivo;
+          convenzioneInfo = acc.convenzioneInfo;
         }
-      } catch { /* fail-open: un errore D1 non deve mai bloccare l'emissione */ }
+      }
+    } else if (voucherAuth) {
+      fascia = "base";
+      if (voucherAuth.conventionId) {
+        const acc = await accountConventionUsage(env, ctx, {
+          conventionId: voucherAuth.conventionId,
+          memberEmail:  voucherAuth.email,
+          credentialId: null,
+          via:          "site",
+          sha256:       digest,
+        });
+        if (acc.fascia) {
+          fascia = acc.fascia;
+          fasciaMotivo = acc.fasciaMotivo;
+          convenzioneInfo = acc.convenzioneInfo;
+        }
+      }
     }
 
     return jsonResponse({
@@ -2148,6 +2309,18 @@ async function peekAgentCredential(request, env) {
   return { id: row.id, conventionId: row.convention_id || null };
 }
 
+// Equivalente di peekAgentCredential per il voucher dal sito (P25 §2.7): sola
+// lettura, nessun consumo di quota (già applicato in handleHash). Rilegge la
+// convenzione fresca da D1, stesso principio di verifyVoucher in handleHash.
+async function peekVoucherConvention(request, env) {
+  const token = request.headers.get("X-SG-Voucher") || "";
+  if (!token) return null;
+  const payload = await verifyVoucher(env, token);
+  if (!payload) return null;
+  const conv = await matchConvention(env, payload.email);
+  return { conventionId: conv ? conv.id : null };
+}
+
 async function handlePdf(request, env, ctx) {
   try {
     const d = await request.json();
@@ -2238,16 +2411,25 @@ async function handlePdf(request, env, ctx) {
       // già stampati e vincolati. Best-effort e idempotente — scritto SOLO alla
       // prima emissione, così la pagina riflette la data più antica (coerente con
       // /api/cert e la prova .ots). Un errore qui non compromette l'emissione.
-      // P25 (B): tier ricalcolato dalla credenziale bearer inviata su QUESTA
-      // richiesta (peekAgentCredential, sola lettura) — mai da un campo
-      // `fascia` nel JSON del client, stesso principio del token HMAC.
-      // Approssimazione nota: riflette l'appartenenza della credenziale alla
-      // convenzione, non l'esito pool/tetto calcolato al momento di /api/hash
-      // (quello resta la fonte di verità per contabilità e log).
+      // P25 (B)+(C): tier ricalcolato dalla credenziale bearer O dal voucher
+      // inviati su QUESTA richiesta (peekAgentCredential/peekVoucherConvention,
+      // sola lettura) — mai da un campo `fascia` nel JSON del client, stesso
+      // principio del token HMAC. Approssimazione nota: riflette l'appartenenza
+      // STATICA della credenziale/voucher alla convenzione, non l'esito
+      // pool/tetto calcolato al momento di /api/hash (quello resta la fonte
+      // di verità per contabilità e log).
       const cred = await peekAgentCredential(request, env);
-      const tier = cred ? (cred.conventionId ? "convenzione" : "sviluppatore") : "base";
+      let tier, tierConventionId;
+      if (cred) {
+        tier = cred.conventionId ? "convenzione" : "sviluppatore";
+        tierConventionId = cred.conventionId || null;
+      } else {
+        const voucherConv = await peekVoucherConvention(request, env);
+        tier = voucherConv?.conventionId ? "convenzione" : "base";
+        tierConventionId = voucherConv?.conventionId || null;
+      }
       if (ctx && typeof ctx.waitUntil === "function") {
-        ctx.waitUntil(writeCertMeta(env, sha256.toLowerCase(), d, meta, tier, cred?.conventionId || null));
+        ctx.waitUntil(writeCertMeta(env, sha256.toLowerCase(), d, meta, tier, tierConventionId));
       }
     }
 
