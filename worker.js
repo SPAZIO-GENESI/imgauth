@@ -547,7 +547,13 @@ function agentAuthorizePageHtml(code) {
         btn.disabled = true;
         msg.textContent = "Autorizzazione in corso…";
         try {
-          var res = await fetch("/api/agent/approve", {
+          // URL ASSOLUTA, non relativa: questa pagina è servita su
+          // attestazione.spaziogenesi.org via route Cloudflare /agent/*,
+          // ma /api/agent/* su quel dominio NON è instradato al Worker
+          // (risponde GitHub Pages, 405). Il CORS di imgauth consente già
+          // l'origine attestazione. Bug latente da P21, scoperto al primo
+          // approve reale dalla pagina (collaudo P26 FASE 4, 2026-07-12).
+          var res = await fetch("https://imgauth.spaziogenesi.org/api/agent/approve", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ code: CODE, turnstile_token: tsToken }),
