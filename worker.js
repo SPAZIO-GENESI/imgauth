@@ -367,7 +367,7 @@ async function authenticateAgent(request, env, ctx) {
   let row;
   try {
     row = await env.DB.prepare(
-      `SELECT id, kind, secret_hash, label, quota, used, period, expires_at, revoked
+      `SELECT id, kind, secret_hash, label, quota, used, period, expires_at, revoked, convention_id, owner_email
        FROM agent_credentials WHERE id = ?`
     ).bind(id).first();
   } catch {
@@ -376,7 +376,11 @@ async function authenticateAgent(request, env, ctx) {
   if (!row || row.kind !== kind || row.revoked) {
     return rejectAgent(env, ctx, "Credenziale non valida.");
   }
-  if (kind === "session" && row.expires_at != null && Date.now() > row.expires_at) {
+  // P25 (B): esteso da "solo session" a entrambi i kind — le chiavi di
+  // convenzione scadono con la convenzione (expires_at = ends_at); le key
+  // manuali/self-service restano NULL, quindi retrocompatibile senza
+  // regressioni sulle credenziali esistenti.
+  if (row.expires_at != null && Date.now() > row.expires_at) {
     return rejectAgent(env, ctx, "Credenziale scaduta.");
   }
 
@@ -423,7 +427,7 @@ async function authenticateAgent(request, env, ctx) {
     }
   }
 
-  return { ok: true };
+  return { ok: true, id, conventionId: row.convention_id || null, ownerEmail: row.owner_email || null };
 }
 
 // ── Device flow (autorizzazione umana una-tantum per MCP, P21) ──────────────
@@ -728,7 +732,12 @@ function devAlreadyActiveBody(id) {
     riceverne una nuova, scrivi a <a href="mailto:it@spaziogenesi.org">it@spaziogenesi.org</a>.</p>`;
 }
 
-function devKeyIssuedBody(key, quota) {
+function devKeyIssuedBody(key, quota, convention) {
+  const convNote = convention
+    ? `<p class="muted">Chiave emessa nell'ambito della convenzione con <strong>${escHtml(convention.name)}</strong> —
+       valida fino al ${escHtml(new Date(convention.ends_at).toLocaleDateString("it-IT"))}; i certificati emessi
+       con questa chiave godono della garanzia di persistenza prevista dalla convenzione.</p>`
+    : "";
   return `<h1>Chiave creata ✓</h1>
     <p class="lead">Copiala ora: per motivi di sicurezza non potremo più mostrartela.</p>
     <div class="fingerprint" style="background:#fdf6e3;border:1px solid var(--oro);padding:.7rem .8rem;border-radius:8px;margin:1rem 0;">${escHtml(key)}</div>
@@ -736,10 +745,37 @@ function devKeyIssuedBody(key, quota) {
     <span class="fingerprint">Authorization: Bearer ${escHtml(key)}</span> su <code>POST /api/hash</code>.
     Se la perdi: scrivi a <a href="mailto:it@spaziogenesi.org">it@spaziogenesi.org</a> per la revoca,
     poi torna qui per riemetterne una nuova.</p>
+    ${convNote}
     <div class="actions">
       <a class="btn primary" href="/docs">Documentazione API</a>
       <a class="btn" href="https://github.com/SPAZIO-GENESI/attest-mcp">Server MCP</a>
     </div>`;
+}
+
+// P25 (B): match dominio email → convenzione attiva. Domini elencati per
+// esteso nella convenzione (niente sottodomini automatici); poche righe
+// attese, il filtro finale in JS va benissimo. Fail-closed silenzioso:
+// un errore D1 equivale a "nessuna convenzione" (percorso self-service
+// normale), mai un 500 sul login.
+async function matchConvention(env, email) {
+  if (!env?.DB) return null;
+  const domain = String(email).split("@")[1];
+  if (!domain) return null;
+  const now = Date.now();
+  let rows;
+  try {
+    rows = await env.DB.prepare(
+      `SELECT id, name, domains, monthly_quota, member_cap, persistence_years, ends_at
+       FROM conventions WHERE active = 1 AND starts_at <= ? AND ends_at > ?`
+    ).bind(now, now).all();
+  } catch {
+    return null;
+  }
+  for (const row of rows.results || []) {
+    const domains = String(row.domains).split(",").map(d => d.trim().toLowerCase()).filter(Boolean);
+    if (domains.includes(domain)) return row;
+  }
+  return null;
 }
 
 // GET /api/dev/oauth/callback/<provider>?code=&state= — scambia il code,
@@ -847,19 +883,27 @@ async function handleDevOAuthCallback(url, provider, env, ctx) {
     return htmlResponse(certPageShell("Chiave già attiva", devAlreadyActiveBody(existing.id)), 200);
   }
 
+  // P25 (B): dominio dell'email ∈ convenzione attiva? Se sì, la chiave nasce
+  // già taggata: quota = tetto individuale (member_cap, secondo argine sotto
+  // il pool mensile dell'ente — vedi §2.4 in handleHash), expires_at = fine
+  // convenzione. Nessun match → percorso self-service identico a prima.
+  const convention = await matchConvention(env, email);
+
   const id          = randomHex(4); // 8 caratteri esadecimali
   const secret      = randomBase64Url(32);
   const key         = `sg_k_${id}_${secret}`;
   const secretHash  = await sha256Hex(secret);
   const createdAt   = new Date().toISOString();
   const period      = createdAt.slice(0, 7); // 'YYYY-MM'
-  const quota       = Number(env?.DEV_KEY_QUOTA) || DEV_KEY_QUOTA_DEFAULT;
+  const quota       = convention ? (convention.member_cap || DEV_KEY_QUOTA_DEFAULT) : (Number(env?.DEV_KEY_QUOTA) || DEV_KEY_QUOTA_DEFAULT);
+  const label       = convention ? `convenzione:${convention.id}` : "self-service";
+  const expiresAt   = convention ? convention.ends_at : null;
 
   try {
     await env.DB.prepare(
-      `INSERT INTO agent_credentials (id, kind, secret_hash, label, quota, used, period, expires_at, revoked, created_at, owner_email, owner_provider)
-       VALUES (?, 'key', ?, 'self-service', ?, 0, ?, NULL, 0, ?, ?, ?)`
-    ).bind(id, secretHash, quota, period, createdAt, email, provider).run();
+      `INSERT INTO agent_credentials (id, kind, secret_hash, label, quota, used, period, expires_at, revoked, created_at, owner_email, owner_provider, convention_id)
+       VALUES (?, 'key', ?, ?, ?, 0, ?, ?, 0, ?, ?, ?, ?)`
+    ).bind(id, secretHash, label, quota, period, expiresAt, createdAt, email, provider, convention ? convention.id : null).run();
   } catch {
     // Corsa con l'indice UNIQUE parziale (ux_agent_owner_active): un'altra
     // richiesta concorrente per la stessa email ha vinto nel frattempo.
@@ -872,12 +916,13 @@ async function handleDevOAuthCallback(url, provider, env, ctx) {
   }
 
   if (ctx && typeof ctx.waitUntil === "function") {
+    const convNote = convention ? ` · convenzione ${convention.id}` : "";
     ctx.waitUntil(sendTelegram(env,
-      `🔑 Spazio Genesi — chiave self-service emessa · ${email} via ${cfg.label} · id ${id} · quota ${quota}/mese`
+      `🔑 Spazio Genesi — chiave self-service emessa · ${email} via ${cfg.label}${convNote} · id ${id} · quota ${quota}/mese`
     ).catch(() => {}));
   }
 
-  return htmlResponse(certPageShell("Chiave API sviluppatori", devKeyIssuedBody(key, quota)));
+  return htmlResponse(certPageShell("Chiave API sviluppatori", devKeyIssuedBody(key, quota, convention)));
 }
 
 // ── Pannello admin credenziali agente (P21 follow-up) ───────────────────────
@@ -984,10 +1029,162 @@ async function handleAdminKeysUpdate(request, env, id) {
 
   try {
     await env.DB.prepare(`UPDATE agent_credentials SET ${sets.join(", ")} WHERE id = ?`).bind(...binds).run();
+    // P25 (B): il "forget" copre anche il log di convenzione — il log
+    // sopravvive pseudonimo (copertura garanzia e totali del pool intatti,
+    // attribuzione individuale rimossa). Match per credential_id: preciso,
+    // non serve conoscere l'email originale.
+    if (body?.forget === true) {
+      await env.DB.prepare(
+        `UPDATE convention_attestations SET member_email = '(rimosso)' WHERE credential_id = ?`
+      ).bind(id).run();
+    }
   } catch {
     return jsonResponse({ error: "Errore interno." }, 500);
   }
   return jsonResponse({ ok: true });
+}
+
+// ── P25 (B): pannello admin convenzioni (CRUD + report) ─────────────────────
+// Stessa protezione di /admin/api/keys (X-Admin-Secret, verifyAdminSecret già
+// applicata dal router prima di chiamare questi handler).
+
+const SLUG_RE = /^[a-z0-9-]{2,32}$/;
+
+async function handleAdminConventionsList(env) {
+  if (!env?.DB) return jsonResponse({ error: "Servizio non disponibile." }, 503);
+  const ym = dayRome().slice(0, 7);
+  try {
+    const { results } = await env.DB.prepare(
+      `SELECT id, name, domains, monthly_quota, member_cap, persistence_years, starts_at, ends_at, active, created_at
+       FROM conventions ORDER BY created_at DESC`
+    ).all();
+    const conventions = [];
+    for (const row of results || []) {
+      const poolRow = await env.DB.prepare(
+        `SELECT COUNT(*) AS attestations, COUNT(DISTINCT member_email) AS members
+         FROM convention_attestations WHERE convention_id = ? AND ym = ?`
+      ).bind(row.id, ym).first();
+      const keysRow = await env.DB.prepare(
+        `SELECT COUNT(*) AS total, SUM(CASE WHEN revoked = 0 THEN 1 ELSE 0 END) AS active_keys
+         FROM agent_credentials WHERE convention_id = ?`
+      ).bind(row.id).first();
+      conventions.push({
+        ...row,
+        pool_used_month: poolRow?.attestations || 0,
+        members_this_month: poolRow?.members || 0,
+        keys_total: keysRow?.total || 0,
+        keys_active: keysRow?.active_keys || 0,
+      });
+    }
+    return jsonResponse({ conventions, ym });
+  } catch {
+    return jsonResponse({ error: "Errore interno." }, 500);
+  }
+}
+
+async function handleAdminConventionsCreate(request, env) {
+  if (!env?.DB) return jsonResponse({ error: "Servizio non disponibile." }, 503);
+  let body;
+  try { body = await request.json(); } catch { return jsonResponse({ error: "Corpo non valido." }, 400); }
+
+  const id = String(body?.id ?? "").trim().toLowerCase();
+  const name = String(body?.name ?? "").trim().slice(0, 200);
+  const domainsRaw = String(body?.domains ?? "").trim();
+  const monthlyQuota = Number(body?.monthly_quota);
+  const memberCap = body?.member_cap === undefined ? 50 : Number(body.member_cap);
+  const persistenceYears = body?.persistence_years === undefined || body?.persistence_years === null
+    ? null : Number(body.persistence_years);
+  const startsAt = Number(body?.starts_at);
+  const endsAt = Number(body?.ends_at);
+
+  if (!SLUG_RE.test(id)) return jsonResponse({ error: "id non valido (a-z0-9-, 2-32 caratteri)." }, 400);
+  if (!name) return jsonResponse({ error: "Nome mancante." }, 400);
+  const domains = domainsRaw.split(",").map(d => d.trim().toLowerCase()).filter(Boolean);
+  if (!domains.length || domains.some(d => d.includes("@") || /\s/.test(d))) {
+    return jsonResponse({ error: "Domini non validi: elenco separato da virgole, senza '@' né spazi." }, 400);
+  }
+  if (!Number.isInteger(monthlyQuota) || monthlyQuota <= 0) return jsonResponse({ error: "monthly_quota non valida." }, 400);
+  if (!Number.isInteger(memberCap) || memberCap < 0) return jsonResponse({ error: "member_cap non valido." }, 400);
+  if (!Number.isInteger(startsAt) || !Number.isInteger(endsAt) || endsAt <= startsAt) {
+    return jsonResponse({ error: "starts_at/ends_at non validi." }, 400);
+  }
+
+  try {
+    await env.DB.prepare(
+      `INSERT INTO conventions (id, name, domains, monthly_quota, member_cap, persistence_years, starts_at, ends_at, active, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`
+    ).bind(id, name, domains.join(","), monthlyQuota, memberCap, persistenceYears, startsAt, endsAt, new Date().toISOString()).run();
+  } catch {
+    return jsonResponse({ error: "Errore interno (id già esistente?)." }, 500);
+  }
+  return jsonResponse({ id }, 201);
+}
+
+async function handleAdminConventionsUpdate(request, env, id) {
+  if (!env?.DB) return jsonResponse({ error: "Servizio non disponibile." }, 503);
+  if (!SLUG_RE.test(id)) return jsonResponse({ error: "id non valido." }, 400);
+  let body;
+  try { body = await request.json(); } catch { return jsonResponse({ error: "Corpo non valido." }, 400); }
+
+  const sets = [], binds = [];
+  if (typeof body?.active === "boolean") { sets.push("active = ?"); binds.push(body.active ? 1 : 0); }
+  if (body?.name !== undefined) { sets.push("name = ?"); binds.push(String(body.name).trim().slice(0, 200)); }
+  if (body?.domains !== undefined) {
+    const domains = String(body.domains).split(",").map(d => d.trim().toLowerCase()).filter(Boolean);
+    if (!domains.length) return jsonResponse({ error: "Domini non validi." }, 400);
+    sets.push("domains = ?"); binds.push(domains.join(","));
+  }
+  if (body?.monthly_quota !== undefined) {
+    const q = Number(body.monthly_quota);
+    if (!Number.isInteger(q) || q <= 0) return jsonResponse({ error: "monthly_quota non valida." }, 400);
+    sets.push("monthly_quota = ?"); binds.push(q);
+  }
+  if (body?.member_cap !== undefined) {
+    const c = Number(body.member_cap);
+    if (!Number.isInteger(c) || c < 0) return jsonResponse({ error: "member_cap non valido." }, 400);
+    sets.push("member_cap = ?"); binds.push(c);
+  }
+  if (body?.ends_at !== undefined) {
+    const e = Number(body.ends_at);
+    if (!Number.isInteger(e)) return jsonResponse({ error: "ends_at non valido." }, 400);
+    sets.push("ends_at = ?"); binds.push(e);
+  }
+  if (!sets.length) return jsonResponse({ error: "Nessuna modifica specificata." }, 400);
+  binds.push(id);
+
+  try {
+    await env.DB.prepare(`UPDATE conventions SET ${sets.join(", ")} WHERE id = ?`).bind(...binds).run();
+  } catch {
+    return jsonResponse({ error: "Errore interno." }, 500);
+  }
+  return jsonResponse({ ok: true });
+}
+
+// Report per fattura/rinnovo: aggregato mensile + membri (visibile SOLO qui,
+// nel pannello del gestore — verso l'ente il dato va condiviso in forma
+// aggregata, mai l'elenco email→conteggio, salvo accordo scritto).
+async function handleAdminConventionsReport(env, id) {
+  if (!env?.DB) return jsonResponse({ error: "Servizio non disponibile." }, 503);
+  if (!SLUG_RE.test(id)) return jsonResponse({ error: "id non valido." }, 400);
+  try {
+    const convention = await env.DB.prepare(`SELECT id, name FROM conventions WHERE id = ?`).bind(id).first();
+    if (!convention) return jsonResponse({ error: "Convenzione non trovata." }, 404);
+    const { results } = await env.DB.prepare(
+      `SELECT ym, member_email, COUNT(*) AS count
+       FROM convention_attestations WHERE convention_id = ?
+       GROUP BY ym, member_email ORDER BY ym DESC, count DESC`
+    ).bind(id).all();
+    const byMonth = new Map();
+    for (const row of results || []) {
+      if (!byMonth.has(row.ym)) byMonth.set(row.ym, { ym: row.ym, attestations: 0, members: [] });
+      const m = byMonth.get(row.ym);
+      m.attestations += row.count;
+      m.members.push({ email: row.member_email, count: row.count });
+    }
+    return jsonResponse({ convention, months: Array.from(byMonth.values()) });
+  } catch {
+    return jsonResponse({ error: "Errore interno." }, 500);
+  }
 }
 
 // Pagina statica (nessun dato incorporato: legge tutto via fetch a /admin/api/keys
@@ -1069,6 +1266,41 @@ function adminPageHtml() {
       </table>
       <p class="msg" id="listMsg"></p>
     </div>
+
+    <div class="card">
+      <h2 style="font-size:1rem;margin:0 0 .8rem;">Nuova convenzione</h2>
+      <div class="row">
+        <div style="flex:0 0 140px;"><label for="cvId">Id (slug)</label><input id="cvId" placeholder="accademia-aq"></div>
+        <div><label for="cvName">Nome ente</label><input id="cvName" placeholder="Accademia di Belle Arti dell'Aquila"></div>
+      </div>
+      <div class="row" style="margin-top:.6rem;">
+        <div><label for="cvDomains">Domini email (separati da virgola, senza @)</label><input id="cvDomains" placeholder="studenti.abaq.it, abaq.it"></div>
+      </div>
+      <div class="row" style="margin-top:.6rem;">
+        <div style="flex:0 0 130px;"><label for="cvMonthlyQuota">Pool/mese</label><input id="cvMonthlyQuota" type="number" value="200" min="1"></div>
+        <div style="flex:0 0 130px;"><label for="cvMemberCap">Tetto/membro</label><input id="cvMemberCap" type="number" value="50" min="0"></div>
+        <div style="flex:0 0 130px;"><label for="cvPersistence">Anni custodia</label><input id="cvPersistence" type="number" value="5" min="1"></div>
+      </div>
+      <div class="row" style="margin-top:.6rem;">
+        <div><label for="cvStarts">Inizio</label><input id="cvStarts" type="date"></div>
+        <div><label for="cvEnds">Fine</label><input id="cvEnds" type="date"></div>
+        <div style="flex:0 0 auto;"><button id="cvCreateBtn">Crea</button></div>
+      </div>
+      <p class="msg" id="cvCreateMsg"></p>
+    </div>
+
+    <div class="card">
+      <h2 style="font-size:1rem;margin:0 0 .8rem;">Convenzioni <button class="secondary" id="cvRefreshBtn" style="float:right;">Aggiorna</button></h2>
+      <table>
+        <thead><tr><th>Ente</th><th>Domini</th><th>Pool mese</th><th>Membri</th><th>Chiavi</th><th>Stato</th><th></th></tr></thead>
+        <tbody id="conventionsBody"></tbody>
+      </table>
+      <p class="msg" id="cvListMsg"></p>
+      <div id="cvReportBox" style="display:none;margin-top:.8rem;">
+        <h3 style="font-size:.9rem;margin:0 0 .5rem;">Report <span id="cvReportTitle"></span></h3>
+        <div id="cvReportContent" style="font-size:.85rem;"></div>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -1110,6 +1342,7 @@ function adminPageHtml() {
     loginCard.style.display = "none";
     app.style.display = "";
     loadKeys();
+    loadConventions();
   }
 
   function fmtDate(iso) {
@@ -1218,6 +1451,99 @@ function adminPageHtml() {
         loadKeys();
       })
       .catch(function (e) { if (e.message !== "unauthorized") { issueMsg.textContent = e.message; issueMsg.className = "msg err"; } });
+  });
+
+  // ── P25 (B): Convenzioni ──────────────────────────────────────────────
+  function dateToMs(inputId) {
+    var v = document.getElementById(inputId).value;
+    if (!v) return null;
+    return new Date(v + "T00:00:00Z").getTime();
+  }
+
+  function cvRowHtml(c) {
+    var statusPill = c.active ? '<span class="pill ok">attiva</span>' : '<span class="pill revoked">disattivata</span>';
+    var actions = '<button class="secondary cv-report-btn" data-id="' + c.id + '" style="margin-right:.4rem;">Report</button>' +
+      '<button class="secondary cv-toggle-btn" data-id="' + c.id + '" data-active="' + (c.active ? '1' : '0') + '">' +
+      (c.active ? 'Disattiva' : 'Riattiva') + '</button>';
+    return '<tr>' +
+      '<td>' + escHtml(c.name) + '<div style="color:var(--muted);font-size:.78rem;">' + escHtml(c.id) + '</div></td>' +
+      '<td>' + escHtml(c.domains) + '</td>' +
+      '<td>' + c.pool_used_month + ' / ' + c.monthly_quota + '</td>' +
+      '<td>' + c.members_this_month + '</td>' +
+      '<td>' + c.keys_active + ' / ' + c.keys_total + '</td>' +
+      '<td>' + statusPill + '</td>' +
+      '<td>' + actions + '</td>' +
+      '</tr>';
+  }
+
+  function loadConventions() {
+    var listMsg = document.getElementById("cvListMsg");
+    listMsg.textContent = "Carico…";
+    listMsg.className = "msg";
+    api("/admin/api/conventions").then(function (data) {
+      var body = document.getElementById("conventionsBody");
+      body.innerHTML = (data.conventions || []).map(cvRowHtml).join("") || '<tr><td colspan="7">Nessuna convenzione.</td></tr>';
+      listMsg.textContent = "";
+      Array.prototype.forEach.call(document.querySelectorAll(".cv-toggle-btn"), function (btn) {
+        btn.addEventListener("click", function () {
+          var nowActive = btn.dataset.active === "1";
+          if (!confirm((nowActive ? "Disattivare" : "Riattivare") + " questa convenzione? Le chiavi già emesse non vengono revocate.")) return;
+          api("/admin/api/conventions/" + btn.dataset.id, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ active: !nowActive }) })
+            .then(loadConventions).catch(function (e) { listMsg.textContent = e.message; listMsg.className = "msg err"; });
+        });
+      });
+      Array.prototype.forEach.call(document.querySelectorAll(".cv-report-btn"), function (btn) {
+        btn.addEventListener("click", function () { showReport(btn.dataset.id); });
+      });
+    }).catch(function (e) {
+      if (e.message !== "unauthorized") { listMsg.textContent = e.message; listMsg.className = "msg err"; }
+    });
+  }
+
+  function showReport(id) {
+    var box = document.getElementById("cvReportBox");
+    var title = document.getElementById("cvReportTitle");
+    var content = document.getElementById("cvReportContent");
+    box.style.display = "";
+    title.textContent = id;
+    content.textContent = "Carico…";
+    api("/admin/api/conventions/" + id + "/report").then(function (data) {
+      title.textContent = data.convention.name + " (" + data.convention.id + ")";
+      if (!data.months.length) { content.textContent = "Nessuna emissione registrata."; return; }
+      var html = '<table><thead><tr><th>Mese</th><th>Attestazioni</th><th>Membri</th></tr></thead><tbody>';
+      data.months.forEach(function (m) {
+        html += '<tr><td>' + escHtml(m.ym) + '</td><td>' + m.attestations + '</td><td>' + m.members.length + '</td></tr>';
+      });
+      html += '</tbody></table>';
+      content.innerHTML = html;
+    }).catch(function (e) { content.textContent = e.message; });
+  }
+
+  document.getElementById("cvRefreshBtn").addEventListener("click", function (e) { e.preventDefault(); loadConventions(); });
+
+  document.getElementById("cvCreateBtn").addEventListener("click", function () {
+    var msg = document.getElementById("cvCreateMsg");
+    var payload = {
+      id: document.getElementById("cvId").value.trim().toLowerCase(),
+      name: document.getElementById("cvName").value.trim(),
+      domains: document.getElementById("cvDomains").value.trim(),
+      monthly_quota: parseInt(document.getElementById("cvMonthlyQuota").value, 10),
+      member_cap: parseInt(document.getElementById("cvMemberCap").value, 10),
+      persistence_years: parseInt(document.getElementById("cvPersistence").value, 10),
+      starts_at: dateToMs("cvStarts"),
+      ends_at: dateToMs("cvEnds"),
+    };
+    if (!payload.id || !payload.name || !payload.domains || !payload.starts_at || !payload.ends_at) {
+      msg.textContent = "Compila tutti i campi."; msg.className = "msg err"; return;
+    }
+    msg.textContent = "Creazione…"; msg.className = "msg";
+    api("/admin/api/conventions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) })
+      .then(function () {
+        msg.textContent = "Fatto."; msg.className = "msg ok";
+        ["cvId", "cvName", "cvDomains"].forEach(function (fid) { document.getElementById(fid).value = ""; });
+        loadConventions();
+      })
+      .catch(function (e) { if (e.message !== "unauthorized") { msg.textContent = e.message; msg.className = "msg err"; } });
   });
 
   if (getSecret()) {
@@ -1332,6 +1658,16 @@ export default {
     if (method === "PATCH" && path.startsWith("/admin/api/keys/")) {
       const id = path.slice("/admin/api/keys/".length);
       return (await verifyAdminSecret(request, env)) ? handleAdminKeysUpdate(request, env, id) : adminUnauthorized();
+    }
+    if (method === "GET"  && path === "/admin/api/conventions") return (await verifyAdminSecret(request, env)) ? handleAdminConventionsList(env) : adminUnauthorized();
+    if (method === "POST" && path === "/admin/api/conventions") return (await verifyAdminSecret(request, env)) ? handleAdminConventionsCreate(request, env) : adminUnauthorized();
+    if (method === "GET"  && path.startsWith("/admin/api/conventions/") && path.endsWith("/report")) {
+      const id = path.slice("/admin/api/conventions/".length, -"/report".length);
+      return (await verifyAdminSecret(request, env)) ? handleAdminConventionsReport(env, id) : adminUnauthorized();
+    }
+    if (method === "PATCH" && path.startsWith("/admin/api/conventions/")) {
+      const id = path.slice("/admin/api/conventions/".length);
+      return (await verifyAdminSecret(request, env)) ? handleAdminConventionsUpdate(request, env, id) : adminUnauthorized();
     }
 
     return jsonResponse({ error: "Endpoint non trovato", path }, 404);
@@ -1459,6 +1795,52 @@ async function handleHash(request, env, ctx) {
       hmacSig = await signHmac(env.HMAC_SECRET, hmacMessage(attestazione, meta));
     }
 
+    // ── P25 (B): fascia + contabilità convenzione ───────────────────────────
+    // Stessa timing della quota individuale (authenticateAgent): l'emissione
+    // dell'attestazione è il momento in cui il "consumo" avviene, non la
+    // successiva generazione del PDF. Nessuna credenziale → fascia Base
+    // (percorso anonimo); credenziale senza convenzione → Sviluppatore;
+    // credenziale con convenzione → pool/tetto individuale, mai un blocco:
+    // esaurito uno dei due argini, l'emissione degrada silenziosamente a
+    // Base con motivo esplicito (mai negata, vedi §1 del design).
+    let fascia = agentAuth && agentAuth.ok ? "sviluppatore" : "base";
+    let fasciaMotivo = null;
+    let convenzioneInfo = null;
+    if (agentAuth && agentAuth.ok && agentAuth.conventionId && env?.DB) {
+      const ym = dayRome().slice(0, 7); // 'YYYY-MM' Europe/Rome
+      try {
+        const conv = await env.DB.prepare(
+          `SELECT id, name, monthly_quota, member_cap FROM conventions WHERE id = ?`
+        ).bind(agentAuth.conventionId).first();
+        if (conv) {
+          const poolRow = await env.DB.prepare(
+            `SELECT COUNT(*) AS c FROM convention_attestations WHERE convention_id = ? AND ym = ?`
+          ).bind(conv.id, ym).first();
+          const poolUsed = poolRow?.c || 0;
+          if (poolUsed >= conv.monthly_quota) {
+            fasciaMotivo = "pool_esaurito";
+          } else if (conv.member_cap > 0) {
+            const capRow = await env.DB.prepare(
+              `SELECT COUNT(*) AS c FROM convention_attestations WHERE convention_id = ? AND member_email = ? AND ym = ?`
+            ).bind(conv.id, agentAuth.ownerEmail, ym).first();
+            if ((capRow?.c || 0) >= conv.member_cap) fasciaMotivo = "tetto_individuale";
+          }
+          if (!fasciaMotivo) {
+            fascia = "convenzione";
+            convenzioneInfo = { id: conv.id, name: conv.name };
+            if (ctx && typeof ctx.waitUntil === "function") {
+              ctx.waitUntil(env.DB.prepare(
+                `INSERT INTO convention_attestations (convention_id, member_email, credential_id, via, sha256, ym, ts)
+                 VALUES (?, ?, ?, 'key', ?, ?, ?)`
+              ).bind(conv.id, agentAuth.ownerEmail, agentAuth.id, digest, ym, Date.now()).run().catch(() => {}));
+            }
+          } else {
+            fascia = "base"; // degrado esplicito: niente tag, niente log
+          }
+        }
+      } catch { /* fail-open: un errore D1 non deve mai bloccare l'emissione */ }
+    }
+
     return jsonResponse({
       opera:               name,
       dimensione_bytes:    size,
@@ -1470,6 +1852,9 @@ async function handleHash(request, env, ctx) {
       attestazione,
       emesso_da:           issuer,
       hmac:                hmacSig,
+      fascia,
+      fascia_motivo:       fasciaMotivo,
+      convenzione:         convenzioneInfo,
     });
   } catch {
     return jsonResponse({ error: "Errore interno del server." }, 500);
@@ -1683,6 +2068,32 @@ async function fillCertificatePdf(d, meta, otsUrl) {
   return new Uint8Array(bytes);
 }
 
+// P25 (B): lookup READ-ONLY della credenziale bearer, usato SOLO per taggare
+// la fascia nel sidecar /c/<hash> — a differenza di authenticateAgent non
+// tocca `used` né fa controlli di quota (già applicati a /api/hash, che è il
+// momento reale del "consumo"; qui servirebbe solo a duplicarli). Verifica
+// comunque il secret (constant-time): un Authorization header non deve poter
+// rivendicare una convenzione senza possedere davvero la credenziale.
+async function peekAgentCredential(request, env) {
+  const auth = request.headers.get("Authorization") || "";
+  if (!auth.startsWith("Bearer ") || !env?.DB) return null;
+  const token = auth.slice("Bearer ".length).trim();
+  const m = BEARER_RE.exec(token);
+  if (!m) return null;
+  const [, kindLetter, id, secret] = m;
+  const kind = kindLetter === "k" ? "key" : "session";
+  let row;
+  try {
+    row = await env.DB.prepare(
+      `SELECT id, kind, secret_hash, revoked, convention_id FROM agent_credentials WHERE id = ?`
+    ).bind(id).first();
+  } catch { return null; }
+  if (!row || row.kind !== kind || row.revoked) return null;
+  const secretHash = await sha256Hex(secret);
+  if (!timingSafeEqualHex(secretHash, row.secret_hash)) return null;
+  return { id: row.id, conventionId: row.convention_id || null };
+}
+
 async function handlePdf(request, env, ctx) {
   try {
     const d = await request.json();
@@ -1773,8 +2184,16 @@ async function handlePdf(request, env, ctx) {
       // già stampati e vincolati. Best-effort e idempotente — scritto SOLO alla
       // prima emissione, così la pagina riflette la data più antica (coerente con
       // /api/cert e la prova .ots). Un errore qui non compromette l'emissione.
+      // P25 (B): tier ricalcolato dalla credenziale bearer inviata su QUESTA
+      // richiesta (peekAgentCredential, sola lettura) — mai da un campo
+      // `fascia` nel JSON del client, stesso principio del token HMAC.
+      // Approssimazione nota: riflette l'appartenenza della credenziale alla
+      // convenzione, non l'esito pool/tetto calcolato al momento di /api/hash
+      // (quello resta la fonte di verità per contabilità e log).
+      const cred = await peekAgentCredential(request, env);
+      const tier = cred ? (cred.conventionId ? "convenzione" : "sviluppatore") : "base";
       if (ctx && typeof ctx.waitUntil === "function") {
-        ctx.waitUntil(writeCertMeta(env, sha256.toLowerCase(), d, meta));
+        ctx.waitUntil(writeCertMeta(env, sha256.toLowerCase(), d, meta, tier, cred?.conventionId || null));
       }
     }
 
@@ -2020,7 +2439,7 @@ async function handleCert(url, env) {
 
 // Sidecar di metadati per la pagina /c/<hash>: i soli campi già stampati sul
 // certificato. Idempotente: preserva la PRIMA emissione. Best-effort.
-async function writeCertMeta(env, hash, d, meta) {
+async function writeCertMeta(env, hash, d, meta, tier, conventionId) {
   const key = `meta/cert/${hash}.json`;
   try {
     if (await env.PDF_ARCHIVE.head(key)) return;
@@ -2036,6 +2455,8 @@ async function writeCertMeta(env, hash, d, meta) {
       autore: meta?.autore || "",
       anno: meta?.anno || "",
       note: meta?.note || "",
+      tier: tier || "base",
+      convention_id: conventionId || null,
     };
     await env.PDF_ARCHIVE.put(key, JSON.stringify(payload), {
       httpMetadata: { contentType: "application/json; charset=utf-8" },
