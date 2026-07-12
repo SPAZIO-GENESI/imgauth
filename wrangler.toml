@@ -59,10 +59,7 @@ DEV_KEY_QUOTA = "50"
 # https://imgauth.spaziogenesi.org/api/dev/oauth/callback/<provider>
 GOOGLE_OAUTH_CLIENT_ID = "309187343194-vrk29hp8hiuhofom419qkl3hrqm01pk8.apps.googleusercontent.com"
 MS_OAUTH_CLIENT_ID = "5317d69f-c3ba-4543-8df5-e8877628ba5c"
-# LINKEDIN_OAUTH_CLIENT_ID: da aggiungere qui dopo la registrazione manuale
-# dell'app su LinkedIn Developer Portal (fail-closed nel frattempo: il
-# bottone "Continua con LinkedIn" resta assente da /developer/keys finché
-# questa var + il secret LINKEDIN_OAUTH_CLIENT_SECRET non sono impostati).
+LINKEDIN_OAUTH_CLIENT_ID = "77eo2x505kv27f"
 
 # Template PDF come ArrayBuffer (import in worker.js)
 [[rules]]
@@ -134,9 +131,10 @@ database_id = "6120b7af-bf22-43de-b1f8-e28163dc5df1"
 #   rollup/notifiche doppie;
 # - SIGNER_URL assente di proposito: authart non è replicato in v1 (D7), lo
 #   staging emette PDF identici ma non firmati;
-# - GOOGLE/MS_OAUTH_CLIENT_ID assenti di proposito: il flusso self-service
-#   richiederebbe redirect URI dedicati non registrati (D2/limiti dichiarati
-#   in DEVOPS.md) — i bottoni di /developer/keys restano assenti, fail-closed.
+# - GOOGLE/MS/LINKEDIN_OAUTH_CLIENT_ID assenti di proposito: il flusso
+#   self-service richiederebbe redirect URI dedicati non registrati (D2/limiti
+#   dichiarati in DEVOPS.md) — i bottoni di /developer/keys restano assenti,
+#   fail-closed.
 [env.staging]
 name = "imgauth-staging"
 workers_dev = true
