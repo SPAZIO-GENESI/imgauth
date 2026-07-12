@@ -136,7 +136,7 @@ const DEV_PROVIDERS = {
 function corsHeaders() {
   return {
     "Access-Control-Allow-Origin": activeAllowedOrigin,
-    "Access-Control-Allow-Methods": "POST, GET, PATCH, OPTIONS",
+    "Access-Control-Allow-Methods": "POST, GET, PATCH, DELETE, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, X-Admin-Secret",
     "Access-Control-Max-Age": "86400",
   };
@@ -1044,6 +1044,23 @@ async function handleAdminKeysUpdate(request, env, id) {
   return jsonResponse({ ok: true });
 }
 
+// Eliminazione DEFINITIVA (a differenza di 'revoked', che è reversibile):
+// pensata per pulire chiavi di test. Il log convention_attestations resta
+// intatto (ha già il proprio credential_id/member_email, indipendente
+// dall'esistenza della riga in agent_credentials — coerente con 'forget',
+// che anonimizza invece di cancellare).
+async function handleAdminKeysDelete(env, id) {
+  if (!env?.DB) return jsonResponse({ error: "Servizio non disponibile." }, 503);
+  if (!/^[0-9a-f]{8}$/i.test(id)) return jsonResponse({ error: "id non valido." }, 400);
+  try {
+    const result = await env.DB.prepare(`DELETE FROM agent_credentials WHERE id = ?`).bind(id).run();
+    if (!result.meta || result.meta.changes === 0) return jsonResponse({ error: "Credenziale non trovata." }, 404);
+  } catch {
+    return jsonResponse({ error: "Errore interno." }, 500);
+  }
+  return jsonResponse({ ok: true });
+}
+
 // ── P25 (B): pannello admin convenzioni (CRUD + report) ─────────────────────
 // Stessa protezione di /admin/api/keys (X-Admin-Secret, verifyAdminSecret già
 // applicata dal router prima di chiamare questi handler).
@@ -1231,6 +1248,10 @@ function adminPageHtml() {
     border:1px solid var(--oro); padding:.6rem .7rem; border-radius:8px; word-break:break-all; margin-top:.6rem; }
   input[type="number"] { width:5.5rem; }
   .qtybox { display:flex; gap:.4rem; align-items:center; }
+  .tabbar { display:flex; gap:.4rem; margin-bottom:1rem; border-bottom:1px solid var(--line); }
+  .tabbtn { font:inherit; font-weight:600; padding:.6rem 1rem; border:none; border-bottom:2px solid transparent;
+    background:none; color:var(--muted); cursor:pointer; }
+  .tabbtn.active { color:var(--oro); border-bottom-color:var(--oro); }
 </style>
 </head>
 <body>
@@ -1247,6 +1268,12 @@ function adminPageHtml() {
   </div>
 
   <div id="app" style="display:none;">
+    <div class="tabbar" role="tablist" aria-label="Sezioni pannello admin">
+      <button class="tabbtn active" id="tabBtnKeys" role="tab" aria-selected="true">Chiavi API</button>
+      <button class="tabbtn" id="tabBtnConventions" role="tab" aria-selected="false">Convenzioni</button>
+    </div>
+
+    <div id="tabKeys">
     <div class="card">
       <h2 style="font-size:1rem;margin:0 0 .8rem;">Nuova API key</h2>
       <div class="row">
@@ -1266,7 +1293,9 @@ function adminPageHtml() {
       </table>
       <p class="msg" id="listMsg"></p>
     </div>
+    </div>
 
+    <div id="tabConventions" style="display:none;">
     <div class="card">
       <h2 style="font-size:1rem;margin:0 0 .8rem;">Nuova convenzione</h2>
       <div class="row">
@@ -1300,6 +1329,7 @@ function adminPageHtml() {
         <h3 style="font-size:.9rem;margin:0 0 .5rem;">Report <span id="cvReportTitle"></span></h3>
         <div id="cvReportContent" style="font-size:.85rem;"></div>
       </div>
+    </div>
     </div>
   </div>
 </div>
@@ -1345,6 +1375,18 @@ function adminPageHtml() {
     loadConventions();
   }
 
+  function showTab(name) {
+    var isKeys = name === "keys";
+    document.getElementById("tabKeys").style.display = isKeys ? "" : "none";
+    document.getElementById("tabConventions").style.display = isKeys ? "none" : "";
+    document.getElementById("tabBtnKeys").classList.toggle("active", isKeys);
+    document.getElementById("tabBtnKeys").setAttribute("aria-selected", String(isKeys));
+    document.getElementById("tabBtnConventions").classList.toggle("active", !isKeys);
+    document.getElementById("tabBtnConventions").setAttribute("aria-selected", String(!isKeys));
+  }
+  document.getElementById("tabBtnKeys").addEventListener("click", function () { showTab("keys"); });
+  document.getElementById("tabBtnConventions").addEventListener("click", function () { showTab("conventions"); });
+
   function fmtDate(iso) {
     if (!iso) return "—";
     try { return new Date(iso).toLocaleString("it-IT", { dateStyle: "short", timeStyle: "short" }); } catch (e) { return iso; }
@@ -1374,6 +1416,7 @@ function adminPageHtml() {
     } else if (!k.revoked) {
       actions += '<button class="danger revoke-btn" data-id="' + k.id + '">Revoca</button>';
     }
+    actions += '<button class="danger delete-btn" data-id="' + k.id + '" data-label="' + escHtml(k.label || k.id) + '" style="margin-left:.4rem;">Elimina</button>';
     return '<tr>' +
       '<td>' + escHtml(k.label || '—') + '</td>' +
       '<td>' + kindLabel + '</td>' +
@@ -1413,6 +1456,13 @@ function adminPageHtml() {
         btn.addEventListener("click", function () {
           if (!confirm("Rimuovere l'email del titolare da questa credenziale? Non si può annullare.")) return;
           api("/admin/api/keys/" + btn.dataset.id, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ forget: true }) })
+            .then(loadKeys).catch(function (e) { listMsg.textContent = e.message; listMsg.className = "msg err"; });
+        });
+      });
+      Array.prototype.forEach.call(document.querySelectorAll(".delete-btn"), function (btn) {
+        btn.addEventListener("click", function () {
+          if (!confirm("Eliminare DEFINITIVAMENTE la credenziale \"" + btn.dataset.label + "\"? A differenza di \"Revoca\", non si può annullare.")) return;
+          api("/admin/api/keys/" + btn.dataset.id, { method: "DELETE" })
             .then(loadKeys).catch(function (e) { listMsg.textContent = e.message; listMsg.className = "msg err"; });
         });
       });
@@ -1658,6 +1708,10 @@ export default {
     if (method === "PATCH" && path.startsWith("/admin/api/keys/")) {
       const id = path.slice("/admin/api/keys/".length);
       return (await verifyAdminSecret(request, env)) ? handleAdminKeysUpdate(request, env, id) : adminUnauthorized();
+    }
+    if (method === "DELETE" && path.startsWith("/admin/api/keys/")) {
+      const id = path.slice("/admin/api/keys/".length);
+      return (await verifyAdminSecret(request, env)) ? handleAdminKeysDelete(env, id) : adminUnauthorized();
     }
     if (method === "GET"  && path === "/admin/api/conventions") return (await verifyAdminSecret(request, env)) ? handleAdminConventionsList(env) : adminUnauthorized();
     if (method === "POST" && path === "/admin/api/conventions") return (await verifyAdminSecret(request, env)) ? handleAdminConventionsCreate(request, env) : adminUnauthorized();

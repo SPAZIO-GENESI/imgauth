@@ -66,12 +66,15 @@
             "sha256": { "type": "string" }, "dimensione_bytes": { "type": "integer", "nullable": true }, "tipo_mime": { "type": "string" },
             "titolo": { "type": "string" }, "autore": { "type": "string" }, "anno": { "type": "string" }, "note": { "type": "string" },
             "timestamp_iso": { "type": "string", "format": "date-time" }, "timestamp_leggibile": { "type": "string" },
-            "attestazione": { "type": "string" }, "emesso_da": { "type": "string" }, "hmac": { "type": "string", "nullable": true }
+            "attestazione": { "type": "string" }, "emesso_da": { "type": "string" }, "hmac": { "type": "string", "nullable": true },
+            "fascia": { "type": "string", "enum": ["base", "sviluppatore", "convenzione"], "description": "Fascia effettiva dell'emissione (P25)" },
+            "fascia_motivo": { "type": "string", "nullable": true, "enum": [null, "pool_esaurito", "tetto_individuale"], "description": "Presente solo se una convenzione è stata degradata a 'base'" },
+            "convenzione": { "type": "object", "nullable": true, "properties": { "id": { "type": "string" }, "name": { "type": "string" } }, "description": "Presente solo se fascia è 'convenzione'" }
           } } } } },
           "400": { "description": "Campo mancante o malformato", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Errore" } } } },
           "403": { "description": "Credenziale agente invalida, o verifica anti-bot non superata", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Errore" } } } },
-          "413": { "description": "File troppo grande (solo percorso legacy, max 100 MB)" },
-          "429": { "description": "Quota credenziale esaurita, o rate limit per-IP (60/60s)" }
+          "413": { "description": "File troppo grande (solo percorso legacy, max 100 MB)", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Errore" } } } },
+          "429": { "description": "Quota credenziale esaurita, o rate limit per-IP (60/60s)", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Errore" } } } }
         }
       }
     },
