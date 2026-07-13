@@ -1356,7 +1356,7 @@ function adminPageHtml() {
   body { margin:0; background:var(--bg); color:var(--ink);
     font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
     line-height:1.5; padding:1.5rem; }
-  .wrap { max-width:920px; margin:0 auto; }
+  .wrap { max-width:1240px; margin:0 auto; }
   h1 { font-size:1.4rem; margin:.2rem 0 1.2rem; }
   .card { background:var(--card); border:1px solid var(--line); border-radius:12px;
     padding:1.3rem 1.4rem; margin-bottom:1.2rem; box-shadow:0 1px 3px rgba(0,0,0,.04); }
@@ -1369,15 +1369,30 @@ function adminPageHtml() {
   button.secondary { background:#fff; color:var(--ink); border-color:var(--line); }
   button.danger { background:#fff; color:var(--danger); border-color:var(--danger); }
   button:disabled { opacity:.5; cursor:default; }
+  button.btn-sm { padding:.32rem .65rem; font-size:.78rem; font-weight:500; border-radius:6px; }
   table { border-collapse:collapse; width:100%; font-size:.88rem; }
-  th, td { border-bottom:1px solid var(--line); padding:.5rem .5rem; text-align:left; vertical-align:middle; }
+  .table-scroll { overflow-x:auto; }
+  th, td { border-bottom:1px solid var(--line); padding:.5rem .5rem; text-align:left; vertical-align:middle; white-space:nowrap; }
+  td.wrap-cell { white-space:normal; }
   th { color:var(--muted); font-weight:600; font-size:.78rem; text-transform:uppercase; letter-spacing:.02em; }
+  th.sortable { cursor:pointer; user-select:none; }
+  th.sortable:hover { color:var(--ink); }
+  th.sortable .arrow { display:inline-block; opacity:.35; font-size:.7rem; margin-left:.2rem; }
+  th.sortable.active .arrow { opacity:1; color:var(--oro); }
   .pill { display:inline-block; font-size:.75rem; font-weight:600; padding:.15rem .55rem; border-radius:999px; }
   .pill.ok { background:#eef6ec; color:#2f6b2a; }
   .pill.revoked { background:#f7e9e9; color:var(--danger); }
   .msg { font-size:.85rem; margin-top:.6rem; }
   .msg.err { color:var(--danger); }
   .msg.ok { color:#2f6b2a; }
+  .section-head { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:.6rem; margin-bottom:.9rem; }
+  .section-head h2 { margin:0; font-size:1rem; }
+  .toolbar { display:flex; align-items:center; gap:.6rem; flex-wrap:wrap; }
+  .toolbar input[type="search"] { width:230px; }
+  .loading-inline { font-size:.8rem; color:var(--muted); white-space:nowrap; }
+  .loading-inline.err { color:var(--danger); }
+  .loading-inline.ok { color:#2f6b2a; }
+  .actions { display:flex; gap:.4rem; flex-wrap:wrap; }
   .fingerprint { font-family:ui-monospace,Consolas,monospace; font-size:.82rem; word-break:break-all; }
   .newkey { font-family:ui-monospace,Consolas,monospace; font-size:.85rem; background:#fdf6e3;
     border:1px solid var(--oro); padding:.6rem .7rem; border-radius:8px; word-break:break-all; margin-top:.6rem; }
@@ -1422,12 +1437,29 @@ function adminPageHtml() {
     </div>
 
     <div class="card">
-      <h2 style="font-size:1rem;margin:0 0 .8rem;">Credenziali esistenti <button class="secondary" id="refreshBtn" style="float:right;">Aggiorna</button></h2>
-      <table>
-        <thead><tr><th>Etichetta</th><th>Tipo</th><th>Titolare</th><th>Quota</th><th>Usate</th><th>Stato</th><th>Creata</th><th></th></tr></thead>
+      <div class="section-head">
+        <h2>Credenziali esistenti</h2>
+        <div class="toolbar">
+          <input type="search" id="keysSearch" placeholder="Cerca etichetta o email…">
+          <span class="loading-inline" id="listMsg"></span>
+          <button class="secondary btn-sm" id="refreshBtn">Aggiorna</button>
+        </div>
+      </div>
+      <div class="table-scroll">
+      <table id="keysTable">
+        <thead><tr>
+          <th class="sortable" data-key="label">Etichetta<span class="arrow">▲</span></th>
+          <th class="sortable" data-key="kind">Tipo<span class="arrow">▲</span></th>
+          <th class="sortable" data-key="owner_email">Titolare<span class="arrow">▲</span></th>
+          <th class="sortable" data-key="quota">Quota<span class="arrow">▲</span></th>
+          <th class="sortable" data-key="used">Usate<span class="arrow">▲</span></th>
+          <th class="sortable" data-key="revoked">Stato<span class="arrow">▲</span></th>
+          <th class="sortable" data-key="created_at">Creata<span class="arrow">▲</span></th>
+          <th></th>
+        </tr></thead>
         <tbody id="keysBody"></tbody>
       </table>
-      <p class="msg" id="listMsg"></p>
+      </div>
     </div>
     </div>
 
@@ -1455,12 +1487,30 @@ function adminPageHtml() {
     </div>
 
     <div class="card">
-      <h2 style="font-size:1rem;margin:0 0 .8rem;">Convenzioni <button class="secondary" id="cvRefreshBtn" style="float:right;">Aggiorna</button></h2>
-      <table>
-        <thead><tr><th>Ente</th><th>Domini</th><th>Pool mese</th><th>Membri</th><th>Chiavi</th><th>Stato</th><th></th></tr></thead>
+      <div class="section-head">
+        <h2>Convenzioni</h2>
+        <div class="toolbar">
+          <input type="search" id="cvSearch" placeholder="Cerca ente o dominio…">
+          <span class="loading-inline" id="cvListMsg"></span>
+          <button class="secondary btn-sm" id="cvRefreshBtn">Aggiorna</button>
+        </div>
+      </div>
+      <div class="table-scroll">
+      <table id="conventionsTable">
+        <thead><tr>
+          <th class="sortable" data-key="name">Ente<span class="arrow">▲</span></th>
+          <th class="sortable" data-key="domains">Domini<span class="arrow">▲</span></th>
+          <th class="sortable" data-key="pool_used_month">Pool mese<span class="arrow">▲</span></th>
+          <th class="sortable" data-key="members_this_month">Membri<span class="arrow">▲</span></th>
+          <th class="sortable" data-key="keys_active">Chiavi<span class="arrow">▲</span></th>
+          <th class="sortable" data-key="starts_at">Inizio<span class="arrow">▲</span></th>
+          <th class="sortable" data-key="ends_at">Fine<span class="arrow">▲</span></th>
+          <th class="sortable" data-key="active">Stato<span class="arrow">▲</span></th>
+          <th></th>
+        </tr></thead>
         <tbody id="conventionsBody"></tbody>
       </table>
-      <p class="msg" id="cvListMsg"></p>
+      </div>
       <div id="cvReportBox" style="display:none;margin-top:.8rem;">
         <h3 style="font-size:.9rem;margin:0 0 .5rem;">Report <span id="cvReportTitle"></span></h3>
         <div id="cvReportContent" style="font-size:.85rem;"></div>
@@ -1531,10 +1581,52 @@ function adminPageHtml() {
     try { return new Date(iso).toLocaleString("it-IT", { dateStyle: "short", timeStyle: "short" }); } catch (e) { return iso; }
   }
 
+  function fmtDateOnly(ms) {
+    if (ms == null || ms === "") return "—";
+    try { return new Date(ms).toLocaleDateString("it-IT"); } catch (e) { return String(ms); }
+  }
+
   function escHtml(s) {
     return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
       return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
     });
+  }
+
+  // ── Ordinamento/ricerca client-side (generico per entrambe le tabelle) ──
+  function bindSortable(tableId, sortState, onChange) {
+    Array.prototype.forEach.call(document.querySelectorAll("#" + tableId + " th.sortable"), function (th) {
+      th.addEventListener("click", function () {
+        var key = th.dataset.key;
+        if (sortState.key === key) { sortState.dir = sortState.dir === "asc" ? "desc" : "asc"; }
+        else { sortState.key = key; sortState.dir = "asc"; }
+        onChange();
+      });
+    });
+  }
+
+  function updateSortIndicators(tableId, sortState) {
+    Array.prototype.forEach.call(document.querySelectorAll("#" + tableId + " th.sortable"), function (th) {
+      var active = th.dataset.key === sortState.key;
+      th.classList.toggle("active", active);
+      var arrow = th.querySelector(".arrow");
+      if (arrow) arrow.textContent = active ? (sortState.dir === "asc" ? "▲" : "▼") : "▲";
+    });
+  }
+
+  function sortRows(rows, sortState, boolKeys) {
+    var sorted = rows.slice();
+    sorted.sort(function (a, b) {
+      var ka = a[sortState.key], kb = b[sortState.key];
+      if (boolKeys && boolKeys.indexOf(sortState.key) !== -1) { ka = ka ? 1 : 0; kb = kb ? 1 : 0; }
+      if (ka == null) ka = "";
+      if (kb == null) kb = "";
+      if (typeof ka === "string") ka = ka.toLowerCase();
+      if (typeof kb === "string") kb = kb.toLowerCase();
+      if (ka < kb) return sortState.dir === "asc" ? -1 : 1;
+      if (ka > kb) return sortState.dir === "asc" ? 1 : -1;
+      return 0;
+    });
+    return sorted;
   }
 
   function rowHtml(k) {
@@ -1545,21 +1637,22 @@ function adminPageHtml() {
     var owner = k.owner_email
       ? escHtml(k.owner_email) + (k.owner_provider ? ' <span style="color:var(--muted);">(' + escHtml(k.owner_provider) + ')</span>' : '')
       : '—';
-    var actions = '';
+    var actions = '<div class="actions">';
     if (k.kind === "key") {
-      actions += '<button class="secondary qty-btn" data-id="' + k.id + '" style="margin-right:.4rem;">Modifica quota</button>';
-      if (!k.revoked) actions += '<button class="danger revoke-btn" data-id="' + k.id + '">Revoca</button>';
+      actions += '<button class="secondary btn-sm qty-btn" data-id="' + k.id + '">Modifica quota</button>';
+      if (!k.revoked) actions += '<button class="danger btn-sm revoke-btn" data-id="' + k.id + '">Revoca</button>';
       if (k.revoked && k.owner_email && k.owner_email !== "(rimosso)") {
-        actions += '<button class="secondary forget-btn" data-id="' + k.id + '" style="margin-left:.4rem;">Dimentica titolare</button>';
+        actions += '<button class="secondary btn-sm forget-btn" data-id="' + k.id + '">Dimentica titolare</button>';
       }
     } else if (!k.revoked) {
-      actions += '<button class="danger revoke-btn" data-id="' + k.id + '">Revoca</button>';
+      actions += '<button class="danger btn-sm revoke-btn" data-id="' + k.id + '">Revoca</button>';
     }
-    actions += '<button class="danger delete-btn" data-id="' + k.id + '" data-label="' + escHtml(k.label || k.id) + '" style="margin-left:.4rem;">Elimina</button>';
+    actions += '<button class="danger btn-sm delete-btn" data-id="' + k.id + '" data-label="' + escHtml(k.label || k.id) + '">Elimina</button>';
+    actions += '</div>';
     return '<tr>' +
-      '<td>' + escHtml(k.label || '—') + '</td>' +
+      '<td class="wrap-cell">' + escHtml(k.label || '—') + '</td>' +
       '<td>' + kindLabel + '</td>' +
-      '<td>' + owner + '</td>' +
+      '<td class="wrap-cell">' + owner + '</td>' +
       '<td>' + k.quota + '</td>' +
       '<td>' + k.used + '</td>' +
       '<td>' + statusPill + '</td>' +
@@ -1568,47 +1661,71 @@ function adminPageHtml() {
       '</tr>';
   }
 
+  var keysData = [];
+  var keysSort = { key: "created_at", dir: "desc" };
+
+  function applyKeysView() {
+    var q = document.getElementById("keysSearch").value.trim().toLowerCase();
+    var filtered = !q ? keysData : keysData.filter(function (k) {
+      return (k.label || "").toLowerCase().indexOf(q) !== -1 ||
+        (k.owner_email || "").toLowerCase().indexOf(q) !== -1 ||
+        (k.id || "").toLowerCase().indexOf(q) !== -1;
+    });
+    var sorted = sortRows(filtered, keysSort, ["revoked"]);
+    var body = document.getElementById("keysBody");
+    body.innerHTML = sorted.map(rowHtml).join("") || '<tr><td colspan="8">Nessuna credenziale.</td></tr>';
+    updateSortIndicators("keysTable", keysSort);
+    attachKeyRowHandlers();
+  }
+
+  function attachKeyRowHandlers() {
+    var listMsg = document.getElementById("listMsg");
+    Array.prototype.forEach.call(document.querySelectorAll(".revoke-btn"), function (btn) {
+      btn.addEventListener("click", function () {
+        if (!confirm("Revocare questa credenziale?")) return;
+        api("/admin/api/keys/" + btn.dataset.id, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ revoked: true }) })
+          .then(loadKeys).catch(function (e) { listMsg.textContent = e.message; listMsg.className = "loading-inline err"; });
+      });
+    });
+    Array.prototype.forEach.call(document.querySelectorAll(".qty-btn"), function (btn) {
+      btn.addEventListener("click", function () {
+        var q = prompt("Nuova quota mensile:");
+        if (!q) return;
+        api("/admin/api/keys/" + btn.dataset.id, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ quota: parseInt(q, 10) }) })
+          .then(loadKeys).catch(function (e) { listMsg.textContent = e.message; listMsg.className = "loading-inline err"; });
+      });
+    });
+    Array.prototype.forEach.call(document.querySelectorAll(".forget-btn"), function (btn) {
+      btn.addEventListener("click", function () {
+        if (!confirm("Rimuovere l'email del titolare da questa credenziale? Non si può annullare.")) return;
+        api("/admin/api/keys/" + btn.dataset.id, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ forget: true }) })
+          .then(loadKeys).catch(function (e) { listMsg.textContent = e.message; listMsg.className = "loading-inline err"; });
+      });
+    });
+    Array.prototype.forEach.call(document.querySelectorAll(".delete-btn"), function (btn) {
+      btn.addEventListener("click", function () {
+        if (!confirm('Eliminare DEFINITIVAMENTE la credenziale ' + btn.dataset.label + '? A differenza di Revoca, non si può annullare.')) return;
+        api("/admin/api/keys/" + btn.dataset.id, { method: "DELETE" })
+          .then(loadKeys).catch(function (e) { listMsg.textContent = e.message; listMsg.className = "loading-inline err"; });
+      });
+    });
+  }
+
   function loadKeys() {
     var listMsg = document.getElementById("listMsg");
     listMsg.textContent = "Carico…";
-    listMsg.className = "msg";
+    listMsg.className = "loading-inline";
     api("/admin/api/keys").then(function (data) {
-      var body = document.getElementById("keysBody");
-      body.innerHTML = (data.keys || []).map(rowHtml).join("") || '<tr><td colspan="7">Nessuna credenziale.</td></tr>';
+      keysData = data.keys || [];
       listMsg.textContent = "";
-      Array.prototype.forEach.call(document.querySelectorAll(".revoke-btn"), function (btn) {
-        btn.addEventListener("click", function () {
-          if (!confirm("Revocare questa credenziale?")) return;
-          api("/admin/api/keys/" + btn.dataset.id, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ revoked: true }) })
-            .then(loadKeys).catch(function (e) { listMsg.textContent = e.message; listMsg.className = "msg err"; });
-        });
-      });
-      Array.prototype.forEach.call(document.querySelectorAll(".qty-btn"), function (btn) {
-        btn.addEventListener("click", function () {
-          var q = prompt("Nuova quota mensile:");
-          if (!q) return;
-          api("/admin/api/keys/" + btn.dataset.id, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ quota: parseInt(q, 10) }) })
-            .then(loadKeys).catch(function (e) { listMsg.textContent = e.message; listMsg.className = "msg err"; });
-        });
-      });
-      Array.prototype.forEach.call(document.querySelectorAll(".forget-btn"), function (btn) {
-        btn.addEventListener("click", function () {
-          if (!confirm("Rimuovere l'email del titolare da questa credenziale? Non si può annullare.")) return;
-          api("/admin/api/keys/" + btn.dataset.id, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ forget: true }) })
-            .then(loadKeys).catch(function (e) { listMsg.textContent = e.message; listMsg.className = "msg err"; });
-        });
-      });
-      Array.prototype.forEach.call(document.querySelectorAll(".delete-btn"), function (btn) {
-        btn.addEventListener("click", function () {
-          if (!confirm('Eliminare DEFINITIVAMENTE la credenziale ' + btn.dataset.label + '? A differenza di Revoca, non si può annullare.')) return;
-          api("/admin/api/keys/" + btn.dataset.id, { method: "DELETE" })
-            .then(loadKeys).catch(function (e) { listMsg.textContent = e.message; listMsg.className = "msg err"; });
-        });
-      });
+      applyKeysView();
     }).catch(function (e) {
-      if (e.message !== "unauthorized") { listMsg.textContent = e.message; listMsg.className = "msg err"; }
+      if (e.message !== "unauthorized") { listMsg.textContent = e.message; listMsg.className = "loading-inline err"; }
     });
   }
+
+  bindSortable("keysTable", keysSort, applyKeysView);
+  document.getElementById("keysSearch").addEventListener("input", applyKeysView);
 
   document.getElementById("loginBtn").addEventListener("click", function () {
     var v = document.getElementById("secretInput").value.trim();
@@ -1658,43 +1775,71 @@ function adminPageHtml() {
 
   function cvRowHtml(c) {
     var statusPill = c.active ? '<span class="pill ok">attiva</span>' : '<span class="pill revoked">disattivata</span>';
-    var actions = '<button class="secondary cv-report-btn" data-id="' + c.id + '" style="margin-right:.4rem;">Report</button>' +
-      '<button class="secondary cv-toggle-btn" data-id="' + c.id + '" data-active="' + (c.active ? '1' : '0') + '">' +
-      (c.active ? 'Disattiva' : 'Riattiva') + '</button>';
+    var actions = '<div class="actions">' +
+      '<button class="secondary btn-sm cv-report-btn" data-id="' + c.id + '">Report</button>' +
+      '<button class="secondary btn-sm cv-toggle-btn" data-id="' + c.id + '" data-active="' + (c.active ? '1' : '0') + '">' +
+      (c.active ? 'Disattiva' : 'Riattiva') + '</button>' +
+      '</div>';
     return '<tr>' +
-      '<td>' + escHtml(c.name) + '<div style="color:var(--muted);font-size:.78rem;">' + escHtml(c.id) + '</div></td>' +
-      '<td>' + escHtml(c.domains) + '</td>' +
+      '<td class="wrap-cell">' + escHtml(c.name) + '<div style="color:var(--muted);font-size:.78rem;">' + escHtml(c.id) + '</div></td>' +
+      '<td class="wrap-cell">' + escHtml(c.domains) + '</td>' +
       '<td>' + c.pool_used_month + ' / ' + c.monthly_quota + '</td>' +
       '<td>' + c.members_this_month + '</td>' +
       '<td>' + c.keys_active + ' / ' + c.keys_total + '</td>' +
+      '<td>' + fmtDateOnly(c.starts_at) + '</td>' +
+      '<td>' + fmtDateOnly(c.ends_at) + '</td>' +
       '<td>' + statusPill + '</td>' +
       '<td>' + actions + '</td>' +
       '</tr>';
   }
 
+  var conventionsData = [];
+  var cvSort = { key: "name", dir: "asc" };
+
+  function applyConventionsView() {
+    var q = document.getElementById("cvSearch").value.trim().toLowerCase();
+    var filtered = !q ? conventionsData : conventionsData.filter(function (c) {
+      return (c.name || "").toLowerCase().indexOf(q) !== -1 ||
+        (c.domains || "").toLowerCase().indexOf(q) !== -1 ||
+        (c.id || "").toLowerCase().indexOf(q) !== -1;
+    });
+    var sorted = sortRows(filtered, cvSort, ["active"]);
+    var body = document.getElementById("conventionsBody");
+    body.innerHTML = sorted.map(cvRowHtml).join("") || '<tr><td colspan="9">Nessuna convenzione.</td></tr>';
+    updateSortIndicators("conventionsTable", cvSort);
+    attachConventionRowHandlers();
+  }
+
+  function attachConventionRowHandlers() {
+    var listMsg = document.getElementById("cvListMsg");
+    Array.prototype.forEach.call(document.querySelectorAll(".cv-toggle-btn"), function (btn) {
+      btn.addEventListener("click", function () {
+        var nowActive = btn.dataset.active === "1";
+        if (!confirm((nowActive ? "Disattivare" : "Riattivare") + " questa convenzione? Le chiavi già emesse non vengono revocate.")) return;
+        api("/admin/api/conventions/" + btn.dataset.id, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ active: !nowActive }) })
+          .then(loadConventions).catch(function (e) { listMsg.textContent = e.message; listMsg.className = "loading-inline err"; });
+      });
+    });
+    Array.prototype.forEach.call(document.querySelectorAll(".cv-report-btn"), function (btn) {
+      btn.addEventListener("click", function () { showReport(btn.dataset.id); });
+    });
+  }
+
   function loadConventions() {
     var listMsg = document.getElementById("cvListMsg");
     listMsg.textContent = "Carico…";
-    listMsg.className = "msg";
+    listMsg.className = "loading-inline";
     api("/admin/api/conventions").then(function (data) {
-      var body = document.getElementById("conventionsBody");
-      body.innerHTML = (data.conventions || []).map(cvRowHtml).join("") || '<tr><td colspan="7">Nessuna convenzione.</td></tr>';
+      conventionsData = data.conventions || [];
       listMsg.textContent = "";
-      Array.prototype.forEach.call(document.querySelectorAll(".cv-toggle-btn"), function (btn) {
-        btn.addEventListener("click", function () {
-          var nowActive = btn.dataset.active === "1";
-          if (!confirm((nowActive ? "Disattivare" : "Riattivare") + " questa convenzione? Le chiavi già emesse non vengono revocate.")) return;
-          api("/admin/api/conventions/" + btn.dataset.id, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ active: !nowActive }) })
-            .then(loadConventions).catch(function (e) { listMsg.textContent = e.message; listMsg.className = "msg err"; });
-        });
-      });
-      Array.prototype.forEach.call(document.querySelectorAll(".cv-report-btn"), function (btn) {
-        btn.addEventListener("click", function () { showReport(btn.dataset.id); });
-      });
+      applyConventionsView();
     }).catch(function (e) {
-      if (e.message !== "unauthorized") { listMsg.textContent = e.message; listMsg.className = "msg err"; }
+      if (e.message !== "unauthorized") { listMsg.textContent = e.message; listMsg.className = "loading-inline err"; }
     });
   }
+
+  bindSortable("conventionsTable", cvSort, applyConventionsView);
+  document.getElementById("cvSearch").addEventListener("input", applyConventionsView);
 
   function showReport(id) {
     var box = document.getElementById("cvReportBox");
