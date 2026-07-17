@@ -39,19 +39,20 @@
   }
 
   function showTab(name) {
-    var isKeys = name === "keys";
-    document.getElementById("tabKeys").style.display = isKeys ? "" : "none";
-    document.getElementById("tabConventions").style.display = isKeys ? "none" : "";
-    document.getElementById("tabBtnKeys").classList.toggle("active", isKeys);
-    document.getElementById("tabBtnKeys").setAttribute("aria-selected", String(isKeys));
-    document.getElementById("tabBtnConventions").classList.toggle("active", !isKeys);
-    document.getElementById("tabBtnConventions").setAttribute("aria-selected", String(!isKeys));
+    var tabs = { keys: "tabKeys", conventions: "tabConventions", pro: "tabPro" };
+    var btns = { keys: "tabBtnKeys", conventions: "tabBtnConventions", pro: "tabBtnPro" };
+    Object.keys(tabs).forEach(function (t) {
+      document.getElementById(tabs[t]).style.display = t === name ? "" : "none";
+      document.getElementById(btns[t]).classList.toggle("active", t === name);
+      document.getElementById(btns[t]).setAttribute("aria-selected", String(t === name));
+    });
   }
   // Ogni apertura di scheda ricarica i dati: chi guarda il pannello non deve
   // sapere che esiste un pulsante "Aggiorna" dedicato per vedere lo stato
   // corrente (es. dopo un'attestazione fatta altrove, come dal sito).
   document.getElementById("tabBtnKeys").addEventListener("click", function () { showTab("keys"); loadKeys(); });
   document.getElementById("tabBtnConventions").addEventListener("click", function () { showTab("conventions"); loadConventions(); });
+  document.getElementById("tabBtnPro").addEventListener("click", function () { showTab("pro"); loadProPricing(); loadProDiscounts(); loadProSubscribers(); });
 
   function fmtDate(iso) {
     if (!iso) return "—";
@@ -363,6 +364,179 @@
       })
       .catch(function (e) { if (e.message !== "unauthorized") { msg.textContent = e.message; msg.className = "msg err"; } });
   });
+
+  // ── P27: Professionale (listino, sconti, abbonati) ──────────────────────
+  function fmtEur(cents) {
+    if (cents == null) return "—";
+    return (cents / 100).toLocaleString("it-IT", { style: "currency", currency: "EUR" });
+  }
+  function eurToCents(v) {
+    var n = parseFloat(v);
+    return isFinite(n) ? Math.round(n * 100) : NaN;
+  }
+
+  function prRowHtml(p, activeId) {
+    var statusPill = p.id === activeId ? '<span class="pill ok">attiva</span>'
+      : (p.valid_to && p.valid_to <= Date.now()) ? '<span class="pill revoked">chiusa</span>' : '<span class="pill" style="background:#f2f0ea;color:var(--muted);">futura</span>';
+    var actions = (!p.valid_to || p.valid_to > Date.now())
+      ? '<button class="secondary btn-sm pr-close-btn" data-id="' + p.id + '">Chiudi</button>' : '';
+    return '<tr>' +
+      '<td class="wrap-cell">' + escHtml(p.label) + '</td>' +
+      '<td>' + fmtEur(p.amount_cents) + '</td>' +
+      '<td>' + fmtDateOnly(p.valid_from) + '</td>' +
+      '<td>' + (p.valid_to ? fmtDateOnly(p.valid_to) : '—') + '</td>' +
+      '<td>' + statusPill + '</td>' +
+      '<td>' + actions + '</td>' +
+      '</tr>';
+  }
+
+  function loadProPricing() {
+    api("/admin/api/pro/pricing").then(function (data) {
+      var body = document.getElementById("prBody");
+      body.innerHTML = (data.pricing || []).map(function (p) { return prRowHtml(p, data.active_id); }).join("") || '<tr><td colspan="6">Nessuna riga di listino.</td></tr>';
+      document.getElementById("prOverlapWarn").style.display = data.overlap_warning ? "" : "none";
+      Array.prototype.forEach.call(document.querySelectorAll(".pr-close-btn"), function (btn) {
+        btn.addEventListener("click", function () {
+          if (!confirm("Chiudere questa riga di listino da adesso?")) return;
+          api("/admin/api/pro/pricing/" + btn.dataset.id, { method: "PATCH" }).then(loadProPricing).catch(function (e) { alert(e.message); });
+        });
+      });
+    }).catch(function () {});
+  }
+
+  document.getElementById("prCreateBtn").addEventListener("click", function () {
+    var msg = document.getElementById("prCreateMsg");
+    var payload = {
+      label: document.getElementById("prLabel").value.trim(),
+      amount_cents: eurToCents(document.getElementById("prAmount").value),
+      valid_from: dateToMs("prStarts"),
+      valid_to: dateToMs("prEnds"),
+    };
+    if (!payload.label || !payload.amount_cents || !payload.valid_from) {
+      msg.textContent = "Compila etichetta, prezzo e data di inizio."; msg.className = "msg err"; return;
+    }
+    msg.textContent = "Creazione…"; msg.className = "msg";
+    api("/admin/api/pro/pricing", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) })
+      .then(function () {
+        msg.textContent = "Fatto."; msg.className = "msg ok";
+        document.getElementById("prLabel").value = "";
+        loadProPricing();
+      })
+      .catch(function (e) { if (e.message !== "unauthorized") { msg.textContent = e.message; msg.className = "msg err"; } });
+  });
+
+  function dcRowHtml(d) {
+    var discount = d.percent_off != null ? d.percent_off + "%" : fmtEur(d.amount_off_cents);
+    var window_ = fmtDateOnly(d.valid_from) + " → " + (d.valid_to ? fmtDateOnly(d.valid_to) : "senza scadenza");
+    var statusPill = d.revoked ? '<span class="pill revoked">revocato</span>' : '<span class="pill ok">attivo</span>';
+    var actions = '<button class="secondary btn-sm dc-toggle-btn" data-id="' + d.id + '" data-revoked="' + (d.revoked ? '1' : '0') + '">' +
+      (d.revoked ? 'Riattiva' : 'Revoca') + '</button>';
+    return '<tr>' +
+      '<td class="fingerprint">' + escHtml(d.code) + '</td>' +
+      '<td>' + discount + '</td>' +
+      '<td class="wrap-cell">' + window_ + '</td>' +
+      '<td>' + (d.restricted_email ? escHtml(d.restricted_email) : '—') + '</td>' +
+      '<td>' + d.used_count + (d.max_uses ? ' / ' + d.max_uses : '') + '</td>' +
+      '<td>' + statusPill + '</td>' +
+      '<td>' + actions + '</td>' +
+      '</tr>';
+  }
+
+  function loadProDiscounts() {
+    api("/admin/api/pro/discounts").then(function (data) {
+      var body = document.getElementById("dcBody");
+      body.innerHTML = (data.discounts || []).map(dcRowHtml).join("") || '<tr><td colspan="7">Nessun codice sconto.</td></tr>';
+      Array.prototype.forEach.call(document.querySelectorAll(".dc-toggle-btn"), function (btn) {
+        btn.addEventListener("click", function () {
+          var nowRevoked = btn.dataset.revoked === "1";
+          api("/admin/api/pro/discounts/" + btn.dataset.id, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ revoked: !nowRevoked }) })
+            .then(loadProDiscounts).catch(function (e) { alert(e.message); });
+        });
+      });
+    }).catch(function () {});
+  }
+
+  document.getElementById("dcCreateBtn").addEventListener("click", function () {
+    var msg = document.getElementById("dcCreateMsg");
+    var percent = document.getElementById("dcPercent").value.trim();
+    var amount = document.getElementById("dcAmount").value.trim();
+    var payload = {
+      code: document.getElementById("dcCode").value.trim().toUpperCase(),
+      percent_off: percent ? parseInt(percent, 10) : null,
+      amount_off_cents: amount ? eurToCents(amount) : null,
+      restricted_email: document.getElementById("dcEmail").value.trim() || null,
+      max_uses: document.getElementById("dcMaxUses").value ? parseInt(document.getElementById("dcMaxUses").value, 10) : null,
+      note: document.getElementById("dcNote").value.trim() || null,
+      valid_from: dateToMs("dcStarts"),
+      valid_to: dateToMs("dcEnds"),
+    };
+    if (!payload.code || !payload.valid_from || (!payload.percent_off && !payload.amount_off_cents)) {
+      msg.textContent = "Serve codice, data di inizio e uno sconto (percentuale O importo)."; msg.className = "msg err"; return;
+    }
+    msg.textContent = "Creazione…"; msg.className = "msg";
+    api("/admin/api/pro/discounts", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) })
+      .then(function () {
+        msg.textContent = "Fatto."; msg.className = "msg ok";
+        ["dcCode", "dcPercent", "dcAmount", "dcEmail", "dcMaxUses", "dcNote"].forEach(function (id) { document.getElementById(id).value = ""; });
+        loadProDiscounts();
+      })
+      .catch(function (e) { if (e.message !== "unauthorized") { msg.textContent = e.message; msg.className = "msg err"; } });
+  });
+
+  var subData = [];
+  var subSort = { key: "created_at", dir: "desc" };
+
+  function subRowHtml(s) {
+    var statusPill = s.status === "active" ? '<span class="pill ok">attivo</span>'
+      : s.status === "past_due" ? '<span class="pill" style="background:#fdf3e0;color:#8a5a00;">in tolleranza</span>'
+      : '<span class="pill revoked">cessato</span>';
+    var lastEvent = s.last_event ? (s.last_event.type + " · " + fmtDate(new Date(s.last_event.ts).toISOString())) : '—';
+    var forgettable = s.email !== "(rimosso)";
+    var actions = forgettable
+      ? '<button class="danger btn-sm sub-forget-btn" data-id="' + s.id + '" data-email="' + escHtml(s.email) + '">Dimentica</button>'
+      : '';
+    return '<tr>' +
+      '<td class="wrap-cell">' + escHtml(s.email) + '</td>' +
+      '<td>' + statusPill + '</td>' +
+      '<td>' + fmtDateOnly(s.current_period_end) + '</td>' +
+      '<td>' + fmtEur(s.price_cents) + '</td>' +
+      '<td>' + s.usage_month + '</td>' +
+      '<td>' + escHtml(lastEvent) + '</td>' +
+      '<td>' + actions + '</td>' +
+      '</tr>';
+  }
+
+  function applySubView() {
+    var q = document.getElementById("subSearch").value.trim().toLowerCase();
+    var filtered = !q ? subData : subData.filter(function (s) { return (s.email || "").toLowerCase().indexOf(q) !== -1; });
+    var sorted = sortRows(filtered, subSort, []);
+    document.getElementById("subBody").innerHTML = sorted.map(subRowHtml).join("") || '<tr><td colspan="7">Nessun abbonato.</td></tr>';
+    updateSortIndicators("subTable", subSort);
+    Array.prototype.forEach.call(document.querySelectorAll(".sub-forget-btn"), function (btn) {
+      btn.addEventListener("click", function () {
+        var deletePdfs = confirm("Eliminare anche i PDF archiviati di " + btn.dataset.email + "? OK = sì (salta gli hash condivisi con altri), Annulla = no, solo anonimizza il profilo.");
+        if (!confirm("Confermi la rimozione del titolare per " + btn.dataset.email + "? Non si può annullare.")) return;
+        api("/admin/api/pro/subscribers/" + btn.dataset.id, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ delete_pdfs: deletePdfs }) })
+          .then(loadProSubscribers).catch(function (e) { alert(e.message); });
+      });
+    });
+  }
+
+  function loadProSubscribers() {
+    var listMsg = document.getElementById("subListMsg");
+    listMsg.textContent = "Carico…"; listMsg.className = "loading-inline";
+    api("/admin/api/pro/subscribers").then(function (data) {
+      subData = data.subscribers || [];
+      listMsg.textContent = "";
+      applySubView();
+    }).catch(function (e) {
+      if (e.message !== "unauthorized") { listMsg.textContent = e.message; listMsg.className = "loading-inline err"; }
+    });
+  }
+
+  bindSortable("subTable", subSort, applySubView);
+  document.getElementById("subSearch").addEventListener("input", applySubView);
+  document.getElementById("subRefreshBtn").addEventListener("click", function (e) { e.preventDefault(); loadProSubscribers(); });
 
   if (getSecret()) {
     api("/admin/api/keys").then(function () { showApp(); }).catch(function () {});

@@ -101,6 +101,21 @@ const DEV_OWNER_RETENTION_MS  = 180 * 24 * 60 * 60 * 1000;   // 180 giorni post-
 // un cookie né una riga D1): 8 ore, come da design.
 const VOUCHER_TTL_MS = 8 * 60 * 60 * 1000;
 
+// Profilazione facoltativa in /profilo (P27 §7, decisione gestore 17/7):
+// valori ammessi, condivisi fra il rendering server della pagina e la
+// validazione di POST /api/pro/profile.
+const PRO_SEGMENTS = ["artista_visivo", "fotografo", "designer", "studio_agenzia", "ente_istituzione", "legale_notarile", "altro"];
+const PRO_SEGMENT_LABELS = {
+  artista_visivo: "Artista visivo", fotografo: "Fotografo", designer: "Designer",
+  studio_agenzia: "Studio o agenzia", ente_istituzione: "Ente o istituzione",
+  legale_notarile: "Ambito legale-notarile", altro: "Altro",
+};
+const IT_REGIONS = [
+  "Abruzzo", "Basilicata", "Calabria", "Campania", "Emilia-Romagna", "Friuli-Venezia Giulia",
+  "Lazio", "Liguria", "Lombardia", "Marche", "Molise", "Piemonte", "Puglia", "Sardegna",
+  "Sicilia", "Toscana", "Trentino-Alto Adige", "Umbria", "Valle d'Aosta", "Veneto", "Estero",
+];
+
 // ── Fascia Professionale — abbonamento (P27) ────────────────────────────────
 // Parametri tarabili (vedi P27-DESIGN-professionale.md §4/§6). La quota vera
 // viene da env.PRO_MONTHLY_QUOTA ([vars] in wrangler.toml, da FASE 4); questi
@@ -696,15 +711,17 @@ function devKeysPageHtml(env) {
   return certPageShell("Chiave API sviluppatori", body);
 }
 
-// GET /api/dev/oauth/start?provider=google|microsoft|linkedin[&purpose=attest]
+// GET /api/dev/oauth/start?provider=google|microsoft|linkedin[&purpose=attest|profile]
 // — apre lo state anti-CSRF (riga effimera in D1, nessun nuovo segreto di
 // firma: lo state È il record) e reindirizza all'authorize URL del provider.
 // purpose='key' (default, P22) emette una chiave sg_k_…; purpose='attest'
 // (P25 §2.7) non tocca agent_credentials, emette solo un voucher stateless
-// nel fragment (vedi handleDevOAuthCallback).
+// nel fragment; purpose='profile' (P27 §2) è lo STESSO voucher, redirect
+// verso /profilo invece che verso il sito (vedi handleDevOAuthCallback).
 async function handleDevOAuthStart(url, env) {
   const provider = url.searchParams.get("provider") || "";
-  const purpose  = url.searchParams.get("purpose") === "attest" ? "attest" : "key";
+  const purposeParam = url.searchParams.get("purpose");
+  const purpose = purposeParam === "attest" ? "attest" : purposeParam === "profile" ? "profile" : "key";
   const cfg = DEV_PROVIDERS[provider];
   if (!cfg) return jsonResponse({ error: "Provider non valido." }, 400);
   const clientId = env?.[cfg.clientIdVar];
@@ -1016,11 +1033,14 @@ async function handleDevOAuthCallback(url, provider, env, ctx) {
   }
   const email = rawEmail.trim().toLowerCase();
 
-  // P25 (C): percorso "attesta con la tua email" dal sito (§2.7) — stessa
-  // barriera OAuth di sopra (email verificata), ma nessuna chiave: solo un
-  // voucher stateless che authweb allega su /api/hash. Il token/l'email non
-  // sono mai persistiti oltre questo punto (invariante 2 del design).
-  if (stateRow.purpose === "attest") {
+  // P25 (C) + P27 §2: percorso "attesta con la tua email" dal sito e pagina
+  // profilo — stessa barriera OAuth di sopra (email verificata), ma nessuna
+  // chiave: solo un voucher stateless che authweb ('attest') o /profilo
+  // ('profile') allegano rispettivamente su /api/hash o /api/pro/*. Stesso
+  // formato di voucher per entrambi (§2 del design: "un voucher ottenuto per
+  // il profilo vale anche per attestare e viceversa"). Il token/l'email non
+  // sono mai persistiti oltre questo punto (invariante 2 del design P25).
+  if (stateRow.purpose === "attest" || stateRow.purpose === "profile") {
     if (!env?.HMAC_SECRET) {
       return htmlResponse(certPageShell("Servizio non disponibile",
         `<p class="lead">Questo percorso non è al momento disponibile. Riprova più tardi.</p>`), 503);
@@ -1032,7 +1052,11 @@ async function handleDevOAuthCallback(url, provider, env, ctx) {
     } catch {
       return htmlResponse(certPageShell("Errore", `<p class="lead">Errore interno. Riprova.</p>`), 500);
     }
-    return Response.redirect(`${CERT_PAGE_BASE}/#sgv=${encodeURIComponent(voucher)}`, 302);
+    // 'profile' resta sul Worker (url.origin: funziona anche in locale, a
+    // differenza di CERT_PAGE_BASE che è il dominio authweb); 'attest' va
+    // sul sito come da P25.
+    const target = stateRow.purpose === "profile" ? `${url.origin}/profilo` : `${CERT_PAGE_BASE}/`;
+    return Response.redirect(`${target}#sgv=${encodeURIComponent(voucher)}`, 302);
   }
 
   let existing;
@@ -1449,6 +1473,7 @@ function adminPageHtml() {
     <div class="tabbar" role="tablist" aria-label="Sezioni pannello admin">
       <button class="tabbtn active" id="tabBtnKeys" role="tab" aria-selected="true">Chiavi API</button>
       <button class="tabbtn" id="tabBtnConventions" role="tab" aria-selected="false">Convenzioni</button>
+      <button class="tabbtn" id="tabBtnPro" role="tab" aria-selected="false">Professionale</button>
     </div>
 
     <div id="tabKeys">
@@ -1544,6 +1569,77 @@ function adminPageHtml() {
       </div>
     </div>
     </div>
+
+    <div id="tabPro" style="display:none;">
+    <div class="card">
+      <h2 style="font-size:1rem;margin:0 0 .8rem;">Listino</h2>
+      <p class="msg" id="prOverlapWarn" style="display:none;color:var(--danger);">⚠️ Più righe di listino sono valide contemporaneamente: verifica le date.</p>
+      <p class="muted" style="margin:0 0 .8rem;">Il prezzo è bloccato all'acquisto: le modifiche valgono solo per i nuovi abbonamenti. Per cambiare prezzo, chiudi la riga corrente e creane una nuova.</p>
+      <div class="row">
+        <div><label for="prLabel">Etichetta</label><input id="prLabel" placeholder="Listino 2026"></div>
+        <div style="flex:0 0 130px;"><label for="prAmount">Prezzo annuo (€)</label><input id="prAmount" type="number" min="0" step="0.01" value="220"></div>
+        <div><label for="prStarts">Inizio</label><input id="prStarts" type="date"></div>
+        <div><label for="prEnds">Fine (facoltativa)</label><input id="prEnds" type="date"></div>
+        <div style="flex:0 0 auto;"><button id="prCreateBtn">Crea</button></div>
+      </div>
+      <p class="msg" id="prCreateMsg"></p>
+      <div class="table-scroll">
+      <table id="prTable">
+        <thead><tr><th>Etichetta</th><th>Prezzo</th><th>Inizio</th><th>Fine</th><th>Stato</th><th></th></tr></thead>
+        <tbody id="prBody"></tbody>
+      </table>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2 style="font-size:1rem;margin:0 0 .8rem;">Codici sconto</h2>
+      <div class="row">
+        <div style="flex:0 0 140px;"><label for="dcCode">Codice</label><input id="dcCode" placeholder="SCONTO20"></div>
+        <div style="flex:0 0 110px;"><label for="dcPercent">% sconto</label><input id="dcPercent" type="number" min="1" max="100"></div>
+        <div style="flex:0 0 130px;"><label for="dcAmount">oppure importo fisso (€)</label><input id="dcAmount" type="number" min="0" step="0.01"></div>
+        <div><label for="dcEmail">Riservato a email (facoltativo)</label><input id="dcEmail" placeholder="persona@esempio.it"></div>
+        <div style="flex:0 0 100px;"><label for="dcMaxUses">Max usi</label><input id="dcMaxUses" type="number" min="1"></div>
+      </div>
+      <div class="row" style="margin-top:.6rem;">
+        <div><label for="dcStarts">Inizio</label><input id="dcStarts" type="date"></div>
+        <div><label for="dcEnds">Fine (facoltativa)</label><input id="dcEnds" type="date"></div>
+        <div><label for="dcNote">Nota</label><input id="dcNote" placeholder="motivo"></div>
+        <div style="flex:0 0 auto;"><button id="dcCreateBtn">Crea</button></div>
+      </div>
+      <p class="msg" id="dcCreateMsg"></p>
+      <div class="table-scroll">
+      <table id="dcTable">
+        <thead><tr><th>Codice</th><th>Sconto</th><th>Finestra</th><th>Riservato</th><th>Usi</th><th>Stato</th><th></th></tr></thead>
+        <tbody id="dcBody"></tbody>
+      </table>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="section-head">
+        <h2>Abbonati</h2>
+        <div class="toolbar">
+          <input type="search" id="subSearch" placeholder="Cerca email…">
+          <span class="loading-inline" id="subListMsg"></span>
+          <button class="secondary btn-sm" id="subRefreshBtn">Aggiorna</button>
+        </div>
+      </div>
+      <div class="table-scroll">
+      <table id="subTable">
+        <thead><tr>
+          <th class="sortable" data-key="email">Email<span class="arrow">▲</span></th>
+          <th class="sortable" data-key="status">Stato<span class="arrow">▲</span></th>
+          <th class="sortable" data-key="current_period_end">Scadenza<span class="arrow">▲</span></th>
+          <th class="sortable" data-key="price_cents">Prezzo<span class="arrow">▲</span></th>
+          <th>Consumo mese</th>
+          <th>Ultimo evento</th>
+          <th></th>
+        </tr></thead>
+        <tbody id="subBody"></tbody>
+      </table>
+      </div>
+    </div>
+    </div>
   </div>
 </div>
 
@@ -1613,10 +1709,12 @@ export default {
       if (await isRateLimited(env.RL_API, ip)) return tooManyResponse();
     } else if (path.startsWith("/admin/api/")) {
       if (await isRateLimited(env.RL_API, ip)) return tooManyResponse();
-    } else if (method === "POST" && (path === "/api/pro/checkout" || path === "/api/pro/portal")) {
+    } else if (method === "POST" && (path === "/api/pro/checkout" || path === "/api/pro/portal" || path === "/api/pro/profile")) {
       if (await isRateLimited(env.RL_API, ip)) return tooManyResponse();
       // /api/pro/stripe-webhook resta DELIBERATAMENTE fuori: Stripe fa retry e
       // burst legittimi, la barriera è la verifica di firma (fail-closed sotto).
+    } else if (method === "GET" && (path === "/profilo" || path === "/api/pro/me" || path === "/api/pro/certificates")) {
+      if (await isRateLimited(env.RL_API, ip)) return tooManyResponse();
     }
 
     if (method === "GET"  && path === "/ping")        return handlePing(request);
@@ -1666,6 +1764,28 @@ export default {
     if (method === "POST" && path === "/api/pro/checkout")       return handleProCheckout(request, url, env, ctx);
     if (method === "POST" && path === "/api/pro/stripe-webhook") return handleStripeWebhook(request, env, ctx);
     if (method === "POST" && path === "/api/pro/portal")         return handleProPortal(request, url, env, ctx);
+    if (method === "GET"  && path === "/profilo")                return htmlResponse(profiloPageHtml(env));
+    if (method === "GET"  && path === "/api/pro/me")             return handleProMe(request, env);
+    if (method === "GET"  && path === "/api/pro/certificates")   return handleProCertificates(request, url, env);
+    if (method === "POST" && path === "/api/pro/profile")        return handleProProfile(request, env);
+
+    if (method === "GET"  && path === "/admin/api/pro/pricing")  return (await verifyAdminSecret(request, env)) ? handleAdminProPricingList(env) : adminUnauthorized();
+    if (method === "POST" && path === "/admin/api/pro/pricing")  return (await verifyAdminSecret(request, env)) ? handleAdminProPricingCreate(request, env) : adminUnauthorized();
+    if (method === "PATCH" && path.startsWith("/admin/api/pro/pricing/")) {
+      const id = path.slice("/admin/api/pro/pricing/".length);
+      return (await verifyAdminSecret(request, env)) ? handleAdminProPricingClose(env, id) : adminUnauthorized();
+    }
+    if (method === "GET"  && path === "/admin/api/pro/discounts") return (await verifyAdminSecret(request, env)) ? handleAdminProDiscountsList(env) : adminUnauthorized();
+    if (method === "POST" && path === "/admin/api/pro/discounts") return (await verifyAdminSecret(request, env)) ? handleAdminProDiscountsCreate(request, env) : adminUnauthorized();
+    if (method === "PATCH" && path.startsWith("/admin/api/pro/discounts/")) {
+      const id = path.slice("/admin/api/pro/discounts/".length);
+      return (await verifyAdminSecret(request, env)) ? handleAdminProDiscountsUpdate(request, env, id) : adminUnauthorized();
+    }
+    if (method === "GET"  && path === "/admin/api/pro/subscribers") return (await verifyAdminSecret(request, env)) ? handleAdminProSubscribersList(env) : adminUnauthorized();
+    if (method === "PATCH" && path.startsWith("/admin/api/pro/subscribers/")) {
+      const id = path.slice("/admin/api/pro/subscribers/".length);
+      return (await verifyAdminSecret(request, env)) ? handleAdminProSubscribersForget(request, env, id) : adminUnauthorized();
+    }
 
     return jsonResponse({ error: "Endpoint non trovato", path }, 404);
   },
@@ -2683,6 +2803,463 @@ async function handleProPortal(request, url, env, ctx) {
   }
 
   return jsonResponse({ url: session.url });
+}
+
+// ── Pagina profilo /profilo (P27 §7) ─────────────────────────────────────────
+// Pagina HTML servita dal Worker (stesso pattern di /developer/keys e
+// /admin: shell server-rendered, dati caricati via fetch dal browser).
+// ZERO JS inline: la logica vive in public/js/profilo.js (Static Assets).
+function profiloPageHtml(env) {
+  const buttons = Object.entries(DEV_PROVIDERS)
+    .filter(([, cfg]) => env?.[cfg.clientIdVar] && env?.[cfg.clientSecretVar])
+    .map(([key, cfg]) => `<a class="btn primary" href="/api/dev/oauth/start?provider=${key}&purpose=profile">Continua con ${escHtml(cfg.label)}</a>`)
+    .join("");
+  const regionOptions = IT_REGIONS.map(r => `<option value="${escHtml(r)}">${escHtml(r)}</option>`).join("");
+  const segmentOptions = PRO_SEGMENTS.map(s => `<option value="${s}">${escHtml(PRO_SEGMENT_LABELS[s])}</option>`).join("");
+
+  return `<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Il tuo profilo Professionale — Spazio Genesi</title>
+<meta name="robots" content="noindex">
+<style>
+  :root { --oro:#8B6914; --bg:#faf8f4; --card:#fff; --ink:#1f1d18; --muted:#6b6453; --line:#e7e1d4; --danger:#a33; --ok:#2f6b2a; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    line-height:1.55; padding:1.5rem; }
+  .wrap { max-width:920px; margin:0 auto; }
+  h1 { font-size:1.5rem; margin:.2rem 0 .3rem; }
+  h2 { font-size:1.05rem; margin:0 0 .8rem; }
+  .lead { font-size:1.02rem; color:var(--ink); }
+  .muted { color:var(--muted); font-size:.88rem; }
+  a { color:var(--oro); }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px;
+    padding:1.4rem 1.5rem; margin-bottom:1.1rem; box-shadow:0 1px 3px rgba(0,0,0,.04); }
+  .btn { display:inline-flex; align-items:center; gap:.45rem; text-decoration:none; font-size:.9rem;
+    font-weight:600; padding:.6rem 1.1rem; border-radius:9px; border:1px solid var(--line); color:var(--ink);
+    background:#fff; cursor:pointer; font-family:inherit; }
+  .btn.primary { background:var(--oro); color:#fff; border-color:var(--oro); }
+  .btn.danger { color:var(--danger); border-color:var(--danger); }
+  .btn:disabled { opacity:.5; cursor:default; }
+  .actions { display:flex; gap:.6rem; flex-wrap:wrap; margin-top:1rem; align-items:center; }
+  .row { display:flex; flex-wrap:wrap; gap:.2rem .9rem; padding:.65rem 0; border-bottom:1px solid var(--line); }
+  .row:last-child { border-bottom:none; }
+  .row .k { flex:0 0 11rem; color:var(--muted); font-size:.85rem; }
+  .row .v { flex:1 1 14rem; min-width:0; }
+  .bar { background:#f2f0ea; border-radius:999px; height:.55rem; overflow:hidden; margin-top:.5rem; }
+  .bar-fill { background:var(--oro); height:100%; }
+  table { border-collapse:collapse; width:100%; font-size:.86rem; }
+  .table-scroll { overflow-x:auto; }
+  th, td { border-bottom:1px solid var(--line); padding:.5rem .5rem; text-align:left; vertical-align:middle; }
+  th { color:var(--muted); font-weight:600; font-size:.76rem; text-transform:uppercase; letter-spacing:.02em; }
+  .fingerprint { font-family:ui-monospace,Consolas,monospace; font-size:.8rem; }
+  label { display:block; font-size:.82rem; color:var(--muted); margin-bottom:.25rem; }
+  input, select { font:inherit; padding:.5rem .6rem; border:1px solid var(--line); border-radius:7px; width:100%; }
+  .formrow { display:flex; gap:.8rem; flex-wrap:wrap; align-items:flex-end; margin-bottom:.5rem; }
+  .formrow > div { flex:1 1 200px; }
+  .msg { font-size:.85rem; margin-top:.6rem; }
+  .msg.err { color:var(--danger); }
+  .msg.ok { color:var(--ok); }
+  .consent { display:flex; align-items:flex-start; gap:.5rem; font-size:.85rem; color:var(--muted); margin:.7rem 0; }
+  .consent input { width:auto; margin-top:.2rem; }
+  .banner { border-radius:10px; padding:.9rem 1.1rem; font-size:.9rem; margin-bottom:1rem; }
+  .banner.warn { background:#fdf3e0; color:#6b4500; border:1px solid #eccf94; }
+  .banner.off { background:#f2f0ea; color:var(--ink); border:1px solid var(--line); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Il tuo profilo Professionale</h1>
+  <p class="muted">Senza account e senza password: la tua email verificata è la tua identità.</p>
+
+  <div class="card" id="stateAnon">
+    <h2>Abbonati alla fascia Professionale</h2>
+    <p class="lead">Attestazioni con continuità, archivio con garanzia di recupero, canale dedicato.</p>
+    <div class="actions">${buttons || '<span class="muted">Nessun provider è al momento configurato.</span>'}</div>
+    <p class="muted" style="margin-top:1rem;">Vedi le <a href="https://attestazione.spaziogenesi.org/condizioni/">fasce e condizioni</a> complete.</p>
+  </div>
+
+  <div class="card" id="stateOnboard" style="display:none;">
+    <h2>Attiva l'abbonamento</h2>
+    <p class="lead" id="onboardPrice"></p>
+    <div class="formrow">
+      <div><label for="discountInput">Hai un codice?</label><input id="discountInput" placeholder="Facoltativo"></div>
+      <div style="flex:0 0 auto;"><button class="btn primary" id="checkoutBtn" type="button">Continua su Stripe</button></div>
+    </div>
+    <p class="msg" id="checkoutMsg"></p>
+    <button class="btn" id="logoutBtnOnboard" type="button">Esci</button>
+  </div>
+
+  <div id="stateActive" style="display:none;">
+    <div class="card">
+      <div id="pastDueBanner" style="display:none;" class="banner warn">Il pagamento più recente non è riuscito. Aggiorna il metodo di pagamento dal portale entro pochi giorni, altrimenti l'abbonamento verrà sospeso.</div>
+      <h2>Stato abbonamento</h2>
+      <div class="row"><span class="k">Stato</span><span class="v" id="subStatus"></span></div>
+      <div class="row"><span class="k">Scadenza</span><span class="v" id="subPeriodEnd"></span></div>
+      <div class="row"><span class="k">Prezzo</span><span class="v" id="subPrice"></span></div>
+      <div class="actions">
+        <button class="btn primary" id="portalBtn" type="button">Gestisci o cessa l'abbonamento</button>
+        <button class="btn" id="logoutBtnActive" type="button">Esci</button>
+      </div>
+      <p class="msg" id="portalMsg"></p>
+    </div>
+
+    <div class="card">
+      <h2>Consumo del mese</h2>
+      <p class="lead" id="usageText"></p>
+      <div class="bar"><div class="bar-fill" id="usageBar" style="width:0%;"></div></div>
+    </div>
+
+    <div class="card">
+      <h2>Log ricariche</h2>
+      <div class="table-scroll"><table><thead><tr><th>Data</th><th>Evento</th><th>Dettaglio</th></tr></thead><tbody id="eventsBody"></tbody></table></div>
+    </div>
+
+    <div class="card">
+      <h2>Archivio certificati</h2>
+      <p class="muted">Solo i certificati emessi in fascia Professionale con questa email — quelli emessi in anonimo prima dell'abbonamento non sono attribuibili e non compaiono.</p>
+      <div class="table-scroll"><table><thead><tr><th>Data</th><th>Impronta</th><th>Canale</th><th></th></tr></thead><tbody id="certsBody"></tbody></table></div>
+      <div class="actions">
+        <button class="btn" id="certsPrevBtn" type="button">« Precedenti</button>
+        <span class="muted" id="certsPageInfo"></span>
+        <button class="btn" id="certsNextBtn" type="button">Successivi »</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Il tuo settore</h2>
+      <p class="muted">Facoltativo. Ci aiuta a proporti condizioni di vantaggio e convenzioni quando disponibili.</p>
+      <div class="formrow">
+        <div><label for="segmentSelect">Segmento</label><select id="segmentSelect"><option value="">—</option>${segmentOptions}</select></div>
+        <div><label for="regionSelect">Regione</label><select id="regionSelect"><option value="">—</option>${regionOptions}</select></div>
+      </div>
+      <label class="consent"><input type="checkbox" id="profileConsent"> Acconsento all'uso di questi dati facoltativi come descritto sopra.</label>
+      <div class="actions">
+        <button class="btn" id="saveProfileBtn" type="button">Salva</button>
+        <button class="btn danger" id="clearProfileBtn" type="button">Rimuovi questi dati</button>
+      </div>
+      <p class="msg" id="profileMsg"></p>
+    </div>
+  </div>
+
+  <div class="card" id="stateCanceled" style="display:none;">
+    <div class="banner off">Abbonamento cessato il <span id="canceledDate"></span>. L'archivio resta consultabile e recuperabile (garanzia 5 anni dalla produzione di ciascun certificato); le nuove attestazioni con questa email tornano alla fascia Base.</div>
+    <div class="actions">
+      <button class="btn primary" id="reactivateBtn" type="button">Riattiva l'abbonamento</button>
+      <button class="btn" id="logoutBtnCanceled" type="button">Esci</button>
+    </div>
+  </div>
+</div>
+<script src="/js/profilo.js" defer></script>
+</body>
+</html>`;
+}
+
+// GET /api/pro/me — stato completo per la pagina profilo (voucher obbligatorio).
+async function handleProMe(request, env) {
+  if (!env?.DB) return jsonResponse({ error: "Servizio non disponibile." }, 503);
+  const token = request.headers.get("X-SG-Voucher") || "";
+  const payload = token ? await verifyVoucher(env, token) : null;
+  if (!payload) return jsonResponse({ error: "voucher_scaduto" }, 403);
+  const email = payload.email;
+
+  const sub = await env.DB.prepare(
+    `SELECT id, status, current_period_end, price_cents, created_at, canceled_at, segment, region
+     FROM pro_subscriptions WHERE email = ? ORDER BY created_at DESC LIMIT 1`
+  ).bind(email).first().catch(() => null);
+
+  let events = [];
+  if (sub) {
+    const evRows = await env.DB.prepare(
+      `SELECT type, ts, detail FROM pro_events WHERE subscription_id = ? ORDER BY ts DESC LIMIT 20`
+    ).bind(sub.id).all().catch(() => ({ results: [] }));
+    events = (evRows.results || []).map(e => ({ type: e.type, ts: e.ts, detail: e.detail ? JSON.parse(e.detail) : null }));
+  }
+
+  const ym = dayRome().slice(0, 7);
+  const quota = Number(env?.PRO_MONTHLY_QUOTA) || PRO_MONTHLY_QUOTA_DEFAULT;
+  const usedRow = await env.DB.prepare(`SELECT COUNT(*) AS c FROM pro_attestations WHERE email = ? AND ym = ?`)
+    .bind(email, ym).first().catch(() => ({ c: 0 }));
+
+  const pricing = await activeProPricing(env);
+
+  return jsonResponse({
+    subscription: sub ? {
+      status: sub.status, period_end: sub.current_period_end, price_cents: sub.price_cents,
+      created_at: sub.created_at, canceled_at: sub.canceled_at,
+    } : null,
+    events,
+    usage: { month: ym, used: usedRow?.c || 0, quota },
+    profile: sub && (sub.segment || sub.region) ? { segment: sub.segment, region: sub.region } : null,
+    pricing: pricing ? { amount_cents: pricing.amount_cents, label: pricing.label, currency: pricing.currency } : null,
+  });
+}
+
+// GET /api/pro/certificates?page= — archivio paginato (voucher obbligatorio).
+async function handleProCertificates(request, url, env) {
+  if (!env?.DB) return jsonResponse({ error: "Servizio non disponibile." }, 503);
+  const token = request.headers.get("X-SG-Voucher") || "";
+  const payload = token ? await verifyVoucher(env, token) : null;
+  if (!payload) return jsonResponse({ error: "voucher_scaduto" }, 403);
+  const email = payload.email;
+
+  const page = Math.max(1, parseInt(url.searchParams.get("page") || "1", 10) || 1);
+  const perPage = 20;
+  const offset = (page - 1) * perPage;
+
+  try {
+    const countRow = await env.DB.prepare(`SELECT COUNT(*) AS c FROM pro_attestations WHERE email = ?`).bind(email).first();
+    const { results } = await env.DB.prepare(
+      `SELECT sha256, channel, ts FROM pro_attestations WHERE email = ? ORDER BY ts DESC LIMIT ? OFFSET ?`
+    ).bind(email, perPage, offset).all();
+    return jsonResponse({
+      certificates: (results || []).map(r => ({ sha256: r.sha256, channel: r.channel, ts: r.ts })),
+      page, per_page: perPage, total: countRow?.c || 0,
+    });
+  } catch {
+    return jsonResponse({ error: "Errore interno." }, 500);
+  }
+}
+
+// POST /api/pro/profile — l'unica scrittura ospitata dal profilo (voucher
+// obbligatorio): salva o azzera segment/region + profile_consent_at.
+async function handleProProfile(request, env) {
+  if (!env?.DB) return jsonResponse({ error: "Servizio non disponibile." }, 503);
+  const token = request.headers.get("X-SG-Voucher") || "";
+  const payload = token ? await verifyVoucher(env, token) : null;
+  if (!payload) return jsonResponse({ error: "voucher_scaduto" }, 403);
+  const email = payload.email;
+
+  let body;
+  try { body = await request.json(); } catch { return jsonResponse({ error: "Corpo non valido." }, 400); }
+
+  const sub = await env.DB.prepare(
+    `SELECT id FROM pro_subscriptions WHERE email = ? AND status IN ('active','past_due') ORDER BY created_at DESC LIMIT 1`
+  ).bind(email).first().catch(() => null);
+  if (!sub) return jsonResponse({ error: "Nessun abbonamento Professionale attivo." }, 404);
+
+  let segment = null, region = null, consentAt = null;
+  if (body?.clear !== true) {
+    segment = body?.segment ? String(body.segment) : null;
+    region  = body?.region  ? String(body.region)  : null;
+    if (segment && !PRO_SEGMENTS.includes(segment)) return jsonResponse({ error: "Segmento non valido." }, 400);
+    if (region && !IT_REGIONS.includes(region)) return jsonResponse({ error: "Regione non valida." }, 400);
+    if ((segment || region) && !body?.consent) return jsonResponse({ error: "Consenso mancante." }, 400);
+    if (segment || region) consentAt = Date.now();
+  }
+
+  try {
+    await env.DB.prepare(
+      `UPDATE pro_subscriptions SET segment = ?, region = ?, profile_consent_at = ? WHERE id = ?`
+    ).bind(segment, region, consentAt, sub.id).run();
+  } catch {
+    return jsonResponse({ error: "Errore interno." }, 500);
+  }
+  return jsonResponse({ ok: true });
+}
+
+// ── Pannello admin: scheda "Professionale" (P27 §9) ──────────────────────────
+// Stessa protezione di /admin/api/keys|conventions (verifyAdminSecret già
+// applicata dal router prima di chiamare questi handler).
+
+async function handleAdminProPricingList(env) {
+  if (!env?.DB) return jsonResponse({ error: "Servizio non disponibile." }, 503);
+  try {
+    const { results } = await env.DB.prepare(
+      `SELECT id, label, amount_cents, currency, valid_from, valid_to, created_at FROM pro_pricing ORDER BY valid_from DESC`
+    ).all();
+    const rows = results || [];
+    const now = Date.now();
+    const open = rows.filter(r => r.valid_from <= now && (r.valid_to == null || r.valid_to > now));
+    const active = open.sort((a, b) => b.valid_from - a.valid_from)[0] || null;
+    return jsonResponse({ pricing: rows, active_id: active ? active.id : null, overlap_warning: open.length > 1 });
+  } catch {
+    return jsonResponse({ error: "Errore interno." }, 500);
+  }
+}
+
+async function handleAdminProPricingCreate(request, env) {
+  if (!env?.DB) return jsonResponse({ error: "Servizio non disponibile." }, 503);
+  let body;
+  try { body = await request.json(); } catch { return jsonResponse({ error: "Corpo non valido." }, 400); }
+
+  const label = String(body?.label ?? "").trim().slice(0, 200);
+  const amountCents = Number(body?.amount_cents);
+  const currency = String(body?.currency ?? "eur").trim().toLowerCase().slice(0, 3) || "eur";
+  const validFrom = Number(body?.valid_from);
+  const validTo = body?.valid_to === undefined || body?.valid_to === null || body?.valid_to === "" ? null : Number(body.valid_to);
+
+  if (!label) return jsonResponse({ error: "Etichetta mancante." }, 400);
+  if (!Number.isInteger(amountCents) || amountCents <= 0) return jsonResponse({ error: "Importo non valido." }, 400);
+  if (!Number.isInteger(validFrom)) return jsonResponse({ error: "Data inizio non valida." }, 400);
+  if (validTo != null && (!Number.isInteger(validTo) || validTo <= validFrom)) return jsonResponse({ error: "Data fine non valida." }, 400);
+
+  const id = `price-${randomHex(4)}`;
+  try {
+    await env.DB.prepare(
+      `INSERT INTO pro_pricing (id, label, amount_cents, currency, valid_from, valid_to, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`
+    ).bind(id, label, amountCents, currency, validFrom, validTo, Date.now()).run();
+  } catch {
+    return jsonResponse({ error: "Errore interno." }, 500);
+  }
+  return jsonResponse({ id }, 201);
+}
+
+// Chiude la finestra di validità (valid_to = now): non si modificano importi
+// di righe passate (audit) — per cambiare prezzo si chiude e se ne crea una nuova.
+async function handleAdminProPricingClose(env, id) {
+  if (!env?.DB) return jsonResponse({ error: "Servizio non disponibile." }, 503);
+  try {
+    const now = Date.now();
+    const result = await env.DB.prepare(
+      `UPDATE pro_pricing SET valid_to = ? WHERE id = ? AND (valid_to IS NULL OR valid_to > ?)`
+    ).bind(now, id, now).run();
+    if (!result.meta || result.meta.changes === 0) return jsonResponse({ error: "Riga non trovata o già chiusa." }, 404);
+  } catch {
+    return jsonResponse({ error: "Errore interno." }, 500);
+  }
+  return jsonResponse({ ok: true });
+}
+
+async function handleAdminProDiscountsList(env) {
+  if (!env?.DB) return jsonResponse({ error: "Servizio non disponibile." }, 503);
+  try {
+    const { results } = await env.DB.prepare(
+      `SELECT id, code, percent_off, amount_off_cents, valid_from, valid_to, restricted_email, max_uses, used_count, revoked, note, created_at
+       FROM pro_discounts ORDER BY created_at DESC`
+    ).all();
+    return jsonResponse({ discounts: results || [] });
+  } catch {
+    return jsonResponse({ error: "Errore interno." }, 500);
+  }
+}
+
+async function handleAdminProDiscountsCreate(request, env) {
+  if (!env?.DB) return jsonResponse({ error: "Servizio non disponibile." }, 503);
+  let body;
+  try { body = await request.json(); } catch { return jsonResponse({ error: "Corpo non valido." }, 400); }
+
+  const code = String(body?.code ?? "").trim().toUpperCase().slice(0, 40);
+  const percentOff = body?.percent_off === undefined || body?.percent_off === null || body?.percent_off === "" ? null : Number(body.percent_off);
+  const amountOffCents = body?.amount_off_cents === undefined || body?.amount_off_cents === null || body?.amount_off_cents === "" ? null : Number(body.amount_off_cents);
+  const validFrom = Number(body?.valid_from);
+  const validTo = body?.valid_to === undefined || body?.valid_to === null || body?.valid_to === "" ? null : Number(body.valid_to);
+  const restrictedEmail = body?.restricted_email ? String(body.restricted_email).trim().toLowerCase() : null;
+  const maxUses = body?.max_uses === undefined || body?.max_uses === null || body?.max_uses === "" ? null : Number(body.max_uses);
+  const note = body?.note ? String(body.note).trim().slice(0, 300) : null;
+
+  if (!/^[A-Z0-9_-]{3,40}$/.test(code)) return jsonResponse({ error: "Codice non valido (A-Z0-9_-, 3-40 caratteri)." }, 400);
+  const hasPercent = percentOff != null, hasAmount = amountOffCents != null;
+  if (hasPercent === hasAmount) return jsonResponse({ error: "Specifica ESATTAMENTE uno tra sconto percentuale e importo fisso." }, 400);
+  if (hasPercent && (!Number.isInteger(percentOff) || percentOff <= 0 || percentOff > 100)) return jsonResponse({ error: "Percentuale non valida (1-100)." }, 400);
+  if (hasAmount && (!Number.isInteger(amountOffCents) || amountOffCents <= 0)) return jsonResponse({ error: "Importo non valido." }, 400);
+  if (!Number.isInteger(validFrom)) return jsonResponse({ error: "Data inizio non valida." }, 400);
+  if (validTo != null && (!Number.isInteger(validTo) || validTo <= validFrom)) return jsonResponse({ error: "Data fine non valida." }, 400);
+  if (maxUses != null && (!Number.isInteger(maxUses) || maxUses <= 0)) return jsonResponse({ error: "Numero massimo di usi non valido." }, 400);
+
+  const id = `disc-${randomHex(4)}`;
+  try {
+    await env.DB.prepare(
+      `INSERT INTO pro_discounts (id, code, percent_off, amount_off_cents, valid_from, valid_to, restricted_email, max_uses, used_count, revoked, note, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)`
+    ).bind(id, code, percentOff, amountOffCents, validFrom, validTo, restrictedEmail, maxUses, note, Date.now()).run();
+  } catch {
+    return jsonResponse({ error: "Errore interno (codice già esistente?)." }, 500);
+  }
+  return jsonResponse({ id }, 201);
+}
+
+async function handleAdminProDiscountsUpdate(request, env, id) {
+  if (!env?.DB) return jsonResponse({ error: "Servizio non disponibile." }, 503);
+  let body;
+  try { body = await request.json(); } catch { return jsonResponse({ error: "Corpo non valido." }, 400); }
+  if (typeof body?.revoked !== "boolean") return jsonResponse({ error: "Nessuna modifica specificata." }, 400);
+  try {
+    const result = await env.DB.prepare(`UPDATE pro_discounts SET revoked = ? WHERE id = ?`).bind(body.revoked ? 1 : 0, id).run();
+    if (!result.meta || result.meta.changes === 0) return jsonResponse({ error: "Codice non trovato." }, 404);
+  } catch {
+    return jsonResponse({ error: "Errore interno." }, 500);
+  }
+  return jsonResponse({ ok: true });
+}
+
+async function handleAdminProSubscribersList(env) {
+  if (!env?.DB) return jsonResponse({ error: "Servizio non disponibile." }, 503);
+  const ym = dayRome().slice(0, 7);
+  try {
+    const { results } = await env.DB.prepare(
+      `SELECT id, email, status, current_period_end, price_cents, pricing_id, discount_code, segment, region, created_at, canceled_at
+       FROM pro_subscriptions ORDER BY created_at DESC`
+    ).all();
+    const subs = [];
+    for (const row of results || []) {
+      const usageRow = await env.DB.prepare(`SELECT COUNT(*) AS c FROM pro_attestations WHERE email = ? AND ym = ?`)
+        .bind(row.email, ym).first();
+      const lastEvent = await env.DB.prepare(`SELECT type, ts FROM pro_events WHERE subscription_id = ? ORDER BY ts DESC LIMIT 1`)
+        .bind(row.id).first();
+      subs.push({ ...row, usage_month: usageRow?.c || 0, last_event: lastEvent || null });
+    }
+    return jsonResponse({ subscribers: subs, ym });
+  } catch {
+    return jsonResponse({ error: "Errore interno." }, 500);
+  }
+}
+
+// "forget" GDPR (§8): anonimizza pro_subscriptions/pro_attestations per
+// l'email indicata (+ owner_email della chiave collegata, se già revocata —
+// stesso invariante di handleAdminKeysUpdate). Opzione delete_pdfs elimina
+// anche i PDF da R2, ma SALTA gli hash condivisi con altre attestazioni
+// (proprie di altri abbonati o di convenzione): il loro diritto di recupero
+// prevale. Il calcolo della condivisione avviene PRIMA di anonimizzare,
+// altrimenti le righe appena anonimizzate falserebbero il conteggio.
+async function handleAdminProSubscribersForget(request, env, id) {
+  if (!env?.DB) return jsonResponse({ error: "Servizio non disponibile." }, 503);
+  let body;
+  try { body = await request.json(); } catch { body = {}; }
+  const deletePdfs = body?.delete_pdfs === true;
+
+  const sub = await env.DB.prepare(`SELECT email FROM pro_subscriptions WHERE id = ?`).bind(id).first().catch(() => null);
+  if (!sub) return jsonResponse({ error: "Abbonamento non trovato." }, 404);
+  const email = sub.email;
+  if (email === "(rimosso)") return jsonResponse({ ok: true, already: true });
+
+  let deletableHashes = [];
+  if (deletePdfs && env?.PDF_ARCHIVE) {
+    const rows = await env.DB.prepare(`SELECT DISTINCT sha256 FROM pro_attestations WHERE email = ?`).bind(email).all().catch(() => ({ results: [] }));
+    for (const r of rows.results || []) {
+      const otherPro = await env.DB.prepare(`SELECT COUNT(*) AS c FROM pro_attestations WHERE sha256 = ? AND email != ?`)
+        .bind(r.sha256, email).first().catch(() => ({ c: 1 }));
+      const anyConv = await env.DB.prepare(`SELECT COUNT(*) AS c FROM convention_attestations WHERE sha256 = ?`)
+        .bind(r.sha256).first().catch(() => ({ c: 1 }));
+      if ((otherPro?.c || 0) === 0 && (anyConv?.c || 0) === 0) deletableHashes.push(r.sha256);
+    }
+  }
+
+  try {
+    await env.DB.batch([
+      env.DB.prepare(`UPDATE pro_subscriptions SET email = '(rimosso)' WHERE email = ?`).bind(email),
+      env.DB.prepare(`UPDATE pro_attestations SET email = '(rimosso)' WHERE email = ?`).bind(email),
+      env.DB.prepare(`UPDATE agent_credentials SET owner_email = '(rimosso)', owner_provider = NULL WHERE owner_email = ? AND revoked = 1`).bind(email),
+    ]);
+  } catch {
+    return jsonResponse({ error: "Errore interno." }, 500);
+  }
+
+  let pdfsDeleted = 0;
+  if (deletableHashes.length && env?.PDF_ARCHIVE) {
+    for (const hash of deletableHashes) {
+      try {
+        const list = await env.PDF_ARCHIVE.list({ prefix: `pdf/${hash}/` });
+        for (const obj of list.objects || []) await env.PDF_ARCHIVE.delete(obj.key);
+        pdfsDeleted++;
+      } catch { /* best-effort */ }
+    }
+  }
+
+  return jsonResponse({ ok: true, pdfs_deleted: pdfsDeleted });
 }
 
 // ── Utility: base64 → Uint8Array ─────────────────────────────────────────────
