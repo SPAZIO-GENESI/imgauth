@@ -33,6 +33,7 @@
 
 import { PDFDocument, rgb, StandardFonts } from "pdf-lib";
 import { encode as encodeQR } from "uqr";
+import Stripe from "stripe";
 import certTemplatePdf from "./certificato_opera_pdf_mod.pdf";
 import pkg from "./package.json";
 import openapiSpec from "./openapi.json";
@@ -1612,6 +1613,10 @@ export default {
       if (await isRateLimited(env.RL_API, ip)) return tooManyResponse();
     } else if (path.startsWith("/admin/api/")) {
       if (await isRateLimited(env.RL_API, ip)) return tooManyResponse();
+    } else if (method === "POST" && (path === "/api/pro/checkout" || path === "/api/pro/portal")) {
+      if (await isRateLimited(env.RL_API, ip)) return tooManyResponse();
+      // /api/pro/stripe-webhook resta DELIBERATAMENTE fuori: Stripe fa retry e
+      // burst legittimi, la barriera è la verifica di firma (fail-closed sotto).
     }
 
     if (method === "GET"  && path === "/ping")        return handlePing(request);
@@ -1658,6 +1663,9 @@ export default {
       const id = path.slice("/admin/api/conventions/".length);
       return (await verifyAdminSecret(request, env)) ? handleAdminConventionsUpdate(request, env, id) : adminUnauthorized();
     }
+    if (method === "POST" && path === "/api/pro/checkout")       return handleProCheckout(request, url, env, ctx);
+    if (method === "POST" && path === "/api/pro/stripe-webhook") return handleStripeWebhook(request, env, ctx);
+    if (method === "POST" && path === "/api/pro/portal")         return handleProPortal(request, url, env, ctx);
 
     return jsonResponse({ error: "Endpoint non trovato", path }, 404);
   },
@@ -2284,6 +2292,397 @@ async function handlePdf(request, env, ctx) {
   } catch {
     return jsonResponse({ error: "Errore interno durante la generazione del certificato." }, 500);
   }
+}
+
+// ── Fascia Professionale — Stripe (P27) ─────────────────────────────────────
+// Checkout, webhook e Customer Portal per l'abbonamento annuale. Client puro
+// verso Stripe: nessun dato di carta tocca mai questo Worker (Checkout e
+// Portal sono pagine hosted di Stripe, SAQ-A). Fail-closed come i provider
+// OAuth: senza STRIPE_SECRET_KEY la fascia semplicemente non compare.
+
+function stripeClient(env) {
+  if (!env?.STRIPE_SECRET_KEY) return null;
+  return new Stripe(env.STRIPE_SECRET_KEY, { httpClient: Stripe.createFetchHttpClient() });
+}
+
+// `current_period_end` è migrato dal livello subscription al livello
+// subscription item nelle versioni API più recenti (multi-item billing) —
+// scoperto testando con dati reali (2026-07-17): il campo top-level è
+// `undefined` sull'account di questo progetto. Fallback al vecchio campo per
+// robustezza su account con apiVersion diversa.
+function subscriptionPeriodEndMs(sub) {
+  const epochSeconds = sub?.items?.data?.[0]?.current_period_end ?? sub?.current_period_end;
+  return Number.isFinite(epochSeconds) ? epochSeconds * 1000 : null;
+}
+
+// Riga di listino valida ORA: valid_from <= now < valid_to (valid_to NULL =
+// aperta). Più righe sovrapposte → vince la più recente (valid_from DESC);
+// l'anomalia va segnalata in admin (FASE 3), qui si applica solo la regola.
+async function activeProPricing(env) {
+  if (!env?.DB) return null;
+  const now = Date.now();
+  try {
+    return await env.DB.prepare(
+      `SELECT id, label, amount_cents, currency FROM pro_pricing
+       WHERE valid_from <= ? AND (valid_to IS NULL OR valid_to > ?)
+       ORDER BY valid_from DESC LIMIT 1`
+    ).bind(now, now).first();
+  } catch {
+    return null; // fail-open sulla lettura, ma senza listino il checkout risponde 503 (vedi handleProCheckout)
+  }
+}
+
+// Codice sconto: MAI ignorato silenziosamente — un codice invalido/scaduto/
+// esaurito/non tuo produce un errore chiaro, non un checkout senza sconto.
+async function resolveProDiscount(env, code, email) {
+  if (!code) return { discount: null, error: null };
+  const normalized = String(code).trim().toUpperCase();
+  if (!normalized) return { discount: null, error: null };
+  const now = Date.now();
+  let row;
+  try {
+    row = await env.DB.prepare(
+      `SELECT id, code, percent_off, amount_off_cents, valid_from, valid_to, restricted_email, max_uses, used_count, revoked
+       FROM pro_discounts WHERE code = ?`
+    ).bind(normalized).first();
+  } catch {
+    return { discount: null, error: "Errore interno." };
+  }
+  if (!row || row.revoked) return { discount: null, error: "Codice sconto non valido." };
+  if (row.valid_from > now || (row.valid_to && row.valid_to <= now)) {
+    return { discount: null, error: "Codice sconto scaduto o non ancora valido." };
+  }
+  if (row.restricted_email && row.restricted_email !== email) {
+    return { discount: null, error: "Codice sconto non valido per questa email." };
+  }
+  if (row.max_uses != null && row.used_count >= row.max_uses) {
+    return { discount: null, error: "Codice sconto esaurito." };
+  }
+  return { discount: row, error: null };
+}
+
+function applyProDiscount(amountCents, discount) {
+  if (!discount) return amountCents;
+  if (discount.percent_off != null) {
+    return Math.max(0, Math.round(amountCents * (100 - discount.percent_off) / 100));
+  }
+  if (discount.amount_off_cents != null) {
+    return Math.max(0, amountCents - discount.amount_off_cents);
+  }
+  return amountCents;
+}
+
+// POST /api/pro/checkout — voucher obbligatorio (nessuna chiave API: è un
+// percorso umano, come /developer/keys). Rifiuta se l'email ha già un
+// abbonamento attivo/past_due (l'indice UNIQUE parziale è la rete di
+// sicurezza, questo è solo un errore leggibile). Il prezzo entra nella
+// Checkout Session come price_data INLINE: il listino vive solo nel nostro
+// D1, niente oggetti Price/Coupon da sincronizzare su Stripe. Conseguenza
+// esposta in admin/profilo: il prezzo è bloccato all'acquisto.
+async function handleProCheckout(request, url, env, ctx) {
+  const stripe = stripeClient(env);
+  if (!stripe || !env?.DB) return jsonResponse({ error: "Servizio non disponibile." }, 503);
+
+  const token = request.headers.get("X-SG-Voucher") || "";
+  const payload = token ? await verifyVoucher(env, token) : null;
+  if (!payload) return jsonResponse({ error: "voucher_scaduto" }, 403);
+  const email = payload.email;
+
+  let body = {};
+  try { body = await request.json(); } catch { /* body facoltativo */ }
+  const discountCode = body?.discount_code ? String(body.discount_code) : null;
+
+  let existing;
+  try {
+    existing = await env.DB.prepare(
+      `SELECT id FROM pro_subscriptions WHERE email = ? AND status IN ('active','past_due')`
+    ).bind(email).first();
+  } catch {
+    return jsonResponse({ error: "Errore interno." }, 500);
+  }
+  if (existing) return jsonResponse({ error: "Hai già un abbonamento Professionale attivo." }, 400);
+
+  const pricing = await activeProPricing(env);
+  if (!pricing) return jsonResponse({ error: "Nessun listino attivo al momento. Riprova più tardi." }, 503);
+
+  const { discount, error: discountError } = await resolveProDiscount(env, discountCode, email);
+  if (discountError) return jsonResponse({ error: discountError }, 400);
+
+  const finalAmount = applyProDiscount(pricing.amount_cents, discount);
+
+  let session;
+  try {
+    session = await stripe.checkout.sessions.create({
+      mode: "subscription",
+      customer_email: email,
+      line_items: [{
+        price_data: {
+          currency: pricing.currency,
+          unit_amount: finalAmount,
+          recurring: { interval: "year" },
+          product_data: { name: "Spazio Genesi — Abbonamento Professionale" },
+        },
+        quantity: 1,
+      }],
+      metadata: { email, pricing_id: pricing.id, discount_code: discount ? discount.code : "" },
+      subscription_data: {
+        metadata: { email, pricing_id: pricing.id, discount_code: discount ? discount.code : "" },
+      },
+      success_url: `${url.origin}/profilo?checkout=success`,
+      cancel_url: `${url.origin}/profilo?checkout=cancel`,
+    });
+  } catch {
+    return jsonResponse({ error: "Errore nella creazione della sessione di pagamento." }, 502);
+  }
+
+  return jsonResponse({ url: session.url });
+}
+
+// checkout.session.completed: nasce l'abbonamento. Idempotente sul retry di
+// Stripe via ON CONFLICT(stripe_subscription_id) — l'INSERT vince UNA sola
+// volta; solo allora si logga l'evento e si consuma il codice sconto (le
+// session abbandonate, senza questo evento, non consumano nulla).
+async function handleProCheckoutCompleted(event, stripe, env, ctx) {
+  const session      = event.data.object;
+  const email        = session.metadata?.email;
+  const pricingId     = session.metadata?.pricing_id || null;
+  const discountCode = session.metadata?.discount_code || null;
+  const subscriptionId = session.subscription;
+  const customerId     = session.customer;
+  if (!email || !subscriptionId || !customerId || !env?.DB) return;
+
+  let sub;
+  try {
+    sub = await stripe.subscriptions.retrieve(subscriptionId);
+  } catch {
+    return; // best-effort: il prossimo invoice.paid aggiorna comunque lo stato
+  }
+  const currentPeriodEnd = subscriptionPeriodEndMs(sub);
+  if (currentPeriodEnd == null) return; // shape inatteso: meglio non scrivere una riga incompleta
+  const priceCents = sub.items?.data?.[0]?.price?.unit_amount ?? 0;
+
+  const id  = `prosub_${randomHex(8)}`;
+  const now = Date.now();
+  let result;
+  try {
+    result = await env.DB.prepare(
+      `INSERT INTO pro_subscriptions (id, email, stripe_customer_id, stripe_subscription_id, status, current_period_end, price_cents, pricing_id, discount_code, created_at)
+       VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)
+       ON CONFLICT(stripe_subscription_id) DO NOTHING`
+    ).bind(id, email, customerId, subscriptionId, currentPeriodEnd, priceCents, pricingId, discountCode, now).run();
+  } catch {
+    return;
+  }
+  if (!result?.meta?.changes) return; // consegna duplicata del webhook: già creato, nessun effetto collaterale
+
+  try {
+    await env.DB.prepare(
+      `INSERT INTO pro_events (id, subscription_id, ts, type, detail) VALUES (?, ?, ?, 'created', ?)
+       ON CONFLICT(id) DO NOTHING`
+    ).bind(event.id, id, now, JSON.stringify({ period_end: currentPeriodEnd, amount_cents: priceCents })).run();
+  } catch { /* non-blocking */ }
+
+  if (discountCode) {
+    try {
+      await env.DB.prepare(`UPDATE pro_discounts SET used_count = used_count + 1 WHERE code = ?`).bind(discountCode).run();
+    } catch { /* non-blocking */ }
+  }
+
+  if (ctx && typeof ctx.waitUntil === "function") {
+    ctx.waitUntil(sendTelegram(env,
+      `💳 Spazio Genesi — abbonamento Professionale attivato · ${email} · €${(priceCents / 100).toFixed(2)}/anno${discountCode ? ` · sconto ${discountCode}` : ""}`
+    ).catch(() => {}));
+  }
+}
+
+// invoice.paid: rinnovo (o prima fattura). Rilegge current_period_end dalla
+// subscription (fonte autoritativa) invece di fidarsi dei campi dell'invoice.
+async function handleProInvoicePaid(event, stripe, env, ctx) {
+  const invoice = event.data.object;
+  const subscriptionId = invoice.subscription;
+  if (!subscriptionId || !env?.DB) return;
+
+  let sub;
+  try {
+    sub = await stripe.subscriptions.retrieve(subscriptionId);
+  } catch {
+    return;
+  }
+  const currentPeriodEnd = subscriptionPeriodEndMs(sub);
+  if (currentPeriodEnd == null) return; // shape inatteso: meglio non scrivere una riga incompleta
+  const now = Date.now();
+
+  let result;
+  try {
+    result = await env.DB.prepare(
+      `UPDATE pro_subscriptions SET status = 'active', current_period_end = ? WHERE stripe_subscription_id = ?`
+    ).bind(currentPeriodEnd, subscriptionId).run();
+  } catch {
+    return;
+  }
+  if (!result?.meta?.changes) return; // subscription sconosciuta a questo D1: ignora
+
+  const row = await env.DB.prepare(`SELECT id, email FROM pro_subscriptions WHERE stripe_subscription_id = ?`)
+    .bind(subscriptionId).first().catch(() => null);
+  if (!row) return;
+
+  try {
+    await env.DB.prepare(
+      `INSERT INTO pro_events (id, subscription_id, ts, type, detail) VALUES (?, ?, ?, 'renewed', ?)
+       ON CONFLICT(id) DO NOTHING`
+    ).bind(event.id, row.id, now, JSON.stringify({ period_end: currentPeriodEnd, invoice_id: invoice.id })).run();
+  } catch { /* non-blocking */ }
+
+  if (ctx && typeof ctx.waitUntil === "function") {
+    ctx.waitUntil(sendTelegram(env,
+      `🔄 Spazio Genesi — rinnovo Professionale · ${row.email} · nuova scadenza ${new Date(currentPeriodEnd).toLocaleDateString("it-IT")}`
+    ).catch(() => {}));
+  }
+}
+
+// invoice.payment_failed: NON cessa l'abbonamento — degrada a 'past_due',
+// che matchProSubscription accetta ancora entro PRO_GRACE_DAYS (i retry di
+// Stripe hanno tempo di riuscire prima che l'utente perda la fascia).
+async function handleProInvoicePaymentFailed(event, env, ctx) {
+  const invoice = event.data.object;
+  const subscriptionId = invoice.subscription;
+  if (!subscriptionId || !env?.DB) return;
+  const now = Date.now();
+
+  let result;
+  try {
+    result = await env.DB.prepare(
+      `UPDATE pro_subscriptions SET status = 'past_due' WHERE stripe_subscription_id = ?`
+    ).bind(subscriptionId).run();
+  } catch {
+    return;
+  }
+  if (!result?.meta?.changes) return;
+
+  const row = await env.DB.prepare(`SELECT id, email FROM pro_subscriptions WHERE stripe_subscription_id = ?`)
+    .bind(subscriptionId).first().catch(() => null);
+  if (!row) return;
+
+  try {
+    await env.DB.prepare(
+      `INSERT INTO pro_events (id, subscription_id, ts, type, detail) VALUES (?, ?, ?, 'payment_failed', ?)
+       ON CONFLICT(id) DO NOTHING`
+    ).bind(event.id, row.id, now, JSON.stringify({ invoice_id: invoice.id })).run();
+  } catch { /* non-blocking */ }
+
+  if (ctx && typeof ctx.waitUntil === "function") {
+    ctx.waitUntil(sendTelegram(env, `⚠️ Spazio Genesi — pagamento Professionale fallito · ${row.email}`).catch(() => {}));
+  }
+}
+
+// customer.subscription.deleted: cessazione (dal Customer Portal o da Stripe
+// dopo retry esauriti). Le attestazioni degradano a Base da qui in poi;
+// l'archivio e il profilo restano accessibili (nessuna cancellazione qui).
+async function handleProSubscriptionDeleted(event, env, ctx) {
+  const sub = event.data.object;
+  const subscriptionId = sub.id;
+  if (!env?.DB) return;
+  const now = Date.now();
+
+  let result;
+  try {
+    result = await env.DB.prepare(
+      `UPDATE pro_subscriptions SET status = 'canceled', canceled_at = ? WHERE stripe_subscription_id = ?`
+    ).bind(now, subscriptionId).run();
+  } catch {
+    return;
+  }
+  if (!result?.meta?.changes) return;
+
+  const row = await env.DB.prepare(`SELECT id, email FROM pro_subscriptions WHERE stripe_subscription_id = ?`)
+    .bind(subscriptionId).first().catch(() => null);
+  if (!row) return;
+
+  try {
+    await env.DB.prepare(
+      `INSERT INTO pro_events (id, subscription_id, ts, type, detail) VALUES (?, ?, ?, 'canceled', NULL)
+       ON CONFLICT(id) DO NOTHING`
+    ).bind(event.id, row.id, now).run();
+  } catch { /* non-blocking */ }
+
+  if (ctx && typeof ctx.waitUntil === "function") {
+    ctx.waitUntil(sendTelegram(env, `🛑 Spazio Genesi — abbonamento Professionale cessato · ${row.email}`).catch(() => {}));
+  }
+}
+
+// POST /api/pro/stripe-webhook — NESSUN rate limit (Stripe fa retry/burst
+// legittimi): la barriera è la verifica di firma, fail-closed. Verifica
+// asincrona con subtle crypto provider (obbligatoria su Workers: il
+// verificatore sincrono di default usa Node crypto, assente in questo runtime).
+async function handleStripeWebhook(request, env, ctx) {
+  const stripe = stripeClient(env);
+  if (!stripe || !env?.STRIPE_WEBHOOK_SECRET || !env?.DB) {
+    return jsonResponse({ error: "Servizio non disponibile." }, 503);
+  }
+  const sig = request.headers.get("stripe-signature") || "";
+  const bodyText = await request.text();
+
+  let event;
+  try {
+    event = await stripe.webhooks.constructEventAsync(
+      bodyText, sig, env.STRIPE_WEBHOOK_SECRET, undefined, Stripe.createSubtleCryptoProvider()
+    );
+  } catch {
+    return jsonResponse({ error: "Firma webhook non valida." }, 400);
+  }
+
+  try {
+    if (event.type === "checkout.session.completed") {
+      await handleProCheckoutCompleted(event, stripe, env, ctx);
+    } else if (event.type === "invoice.paid") {
+      await handleProInvoicePaid(event, stripe, env, ctx);
+    } else if (event.type === "invoice.payment_failed") {
+      await handleProInvoicePaymentFailed(event, env, ctx);
+    } else if (event.type === "customer.subscription.deleted") {
+      await handleProSubscriptionDeleted(event, env, ctx);
+    }
+    // Eventi non gestiti: Stripe manda molto più di quel che serve, si ignorano.
+  } catch {
+    // Un errore di elaborazione non deve far ripetere Stripe all'infinito con lo
+    // stesso esito: gli handler sono già idempotenti (ON CONFLICT), 200 comunque.
+  }
+
+  return jsonResponse({ received: true });
+}
+
+// POST /api/pro/portal — voucher obbligatorio. Crea una Billing Portal
+// Session Stripe per lo stripe_customer_id dell'email: TUTTE le azioni di
+// gestione (fatture, metodo di pagamento, cessazione) avvengono lì, mai su
+// questo Worker (decisione gestore: opzione C).
+async function handleProPortal(request, url, env, ctx) {
+  const stripe = stripeClient(env);
+  if (!stripe || !env?.DB) return jsonResponse({ error: "Servizio non disponibile." }, 503);
+
+  const token = request.headers.get("X-SG-Voucher") || "";
+  const payload = token ? await verifyVoucher(env, token) : null;
+  if (!payload) return jsonResponse({ error: "voucher_scaduto" }, 403);
+
+  let row;
+  try {
+    row = await env.DB.prepare(
+      `SELECT stripe_customer_id FROM pro_subscriptions WHERE email = ? AND status IN ('active','past_due') ORDER BY created_at DESC LIMIT 1`
+    ).bind(payload.email).first();
+  } catch {
+    return jsonResponse({ error: "Errore interno." }, 500);
+  }
+  if (!row) return jsonResponse({ error: "Nessun abbonamento Professionale attivo per questa email." }, 404);
+
+  let session;
+  try {
+    session = await stripe.billingPortal.sessions.create({
+      customer: row.stripe_customer_id,
+      return_url: `${url.origin}/profilo`,
+    });
+  } catch {
+    return jsonResponse({ error: "Errore nella creazione della sessione del portale." }, 502);
+  }
+
+  return jsonResponse({ url: session.url });
 }
 
 // ── Utility: base64 → Uint8Array ─────────────────────────────────────────────
