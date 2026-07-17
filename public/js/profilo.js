@@ -59,7 +59,7 @@
     });
   }
 
-  var EVENT_LABELS = { created: "Attivazione", renewed: "Rinnovo", payment_failed: "Pagamento non riuscito", canceled: "Cessazione" };
+  var EVENT_LABELS = { created: "Attivazione", renewed: "Rinnovo", payment_failed: "Pagamento non riuscito", canceled: "Cessazione", cancel_scheduled: "Cessazione programmata" };
   var CHANNEL_LABELS = { web: "Sito", api: "API o agente con chiave", mcp: "MCP (sessione)", telegram: "Bot Telegram" };
 
   var certsPage = 1;
@@ -80,6 +80,7 @@
       return;
     }
     document.getElementById("pastDueBanner").style.display = sub.status === "past_due" ? "" : "none";
+    document.getElementById("cancelScheduledBanner").style.display = sub.cancel_at_period_end ? "" : "none";
     document.getElementById("subStatus").textContent = sub.status === "past_due" ? "In tolleranza (pagamento da confermare)" : "Attivo";
     document.getElementById("subPeriodEnd").textContent = fmtDate(sub.period_end);
     document.getElementById("subPrice").textContent = fmtEur(sub.price_cents) + " / anno";

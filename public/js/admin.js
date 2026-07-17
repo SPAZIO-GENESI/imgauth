@@ -487,7 +487,8 @@
   var subSort = { key: "created_at", dir: "desc" };
 
   function subRowHtml(s) {
-    var statusPill = s.status === "active" ? '<span class="pill ok">attivo</span>'
+    var statusPill = s.status === "active"
+      ? (s.cancel_at_period_end ? '<span class="pill" style="background:#f2f0ea;color:var(--muted);">cessa a fine periodo</span>' : '<span class="pill ok">attivo</span>')
       : s.status === "past_due" ? '<span class="pill" style="background:#fdf3e0;color:#8a5a00;">in tolleranza</span>'
       : '<span class="pill revoked">cessato</span>';
     var lastEvent = s.last_event ? (s.last_event.type + " · " + fmtDate(new Date(s.last_event.ts).toISOString())) : '—';

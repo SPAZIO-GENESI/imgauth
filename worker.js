@@ -2730,6 +2730,51 @@ async function handleProSubscriptionDeleted(event, env, ctx) {
   }
 }
 
+// customer.subscription.updated: cattura in particolare `cancel_at_period_end`
+// — comportamento di DEFAULT del Customer Portal per abbonamenti annuali
+// pagati in anticipo (cancella A FINE PERIODO, non subito). `status` resta
+// 'active' finché Stripe non manda davvero .deleted alla scadenza: la fascia
+// Professionale continua fino a lì (matchProSubscription non cambia, legge
+// solo `status`). Qui sincronizziamo SOLO il flag informativo per la pagina
+// profilo; idempotente (un UPDATE con lo stesso valore non fa danno) e logga
+// l'evento solo quando il flag passa a true (la revoca della cancellazione
+// dal portale, false→true→false, non merita un evento in bacheca).
+async function handleProSubscriptionUpdated(event, env, ctx) {
+  const sub = event.data.object;
+  const subscriptionId = sub.id;
+  if (!env?.DB) return;
+  const scheduled = sub.cancel_at_period_end === true;
+  const now = Date.now();
+
+  let result;
+  try {
+    result = await env.DB.prepare(
+      `UPDATE pro_subscriptions SET cancel_at_period_end = ? WHERE stripe_subscription_id = ? AND status IN ('active','past_due')`
+    ).bind(scheduled ? 1 : 0, subscriptionId).run();
+  } catch {
+    return;
+  }
+  if (!result?.meta?.changes || !scheduled) return; // subscription sconosciuta, già cessata, o revoca: nessun evento da loggare
+
+  const row = await env.DB.prepare(`SELECT id, email FROM pro_subscriptions WHERE stripe_subscription_id = ?`)
+    .bind(subscriptionId).first().catch(() => null);
+  if (!row) return;
+
+  const periodEnd = subscriptionPeriodEndMs(sub);
+  try {
+    await env.DB.prepare(
+      `INSERT INTO pro_events (id, subscription_id, ts, type, detail) VALUES (?, ?, ?, 'cancel_scheduled', ?)
+       ON CONFLICT(id) DO NOTHING`
+    ).bind(event.id, row.id, now, JSON.stringify({ period_end: periodEnd })).run();
+  } catch { /* non-blocking */ }
+
+  if (ctx && typeof ctx.waitUntil === "function") {
+    ctx.waitUntil(sendTelegram(env,
+      `📅 Spazio Genesi — cessazione Professionale programmata · ${row.email} · attivo fino al ${periodEnd ? new Date(periodEnd).toLocaleDateString("it-IT") : "?"}`
+    ).catch(() => {}));
+  }
+}
+
 // POST /api/pro/stripe-webhook — NESSUN rate limit (Stripe fa retry/burst
 // legittimi): la barriera è la verifica di firma, fail-closed. Verifica
 // asincrona con subtle crypto provider (obbligatoria su Workers: il
@@ -2760,6 +2805,8 @@ async function handleStripeWebhook(request, env, ctx) {
       await handleProInvoicePaymentFailed(event, env, ctx);
     } else if (event.type === "customer.subscription.deleted") {
       await handleProSubscriptionDeleted(event, env, ctx);
+    } else if (event.type === "customer.subscription.updated") {
+      await handleProSubscriptionUpdated(event, env, ctx);
     }
     // Eventi non gestiti: Stripe manda molto più di quel che serve, si ignorano.
   } catch {
@@ -2896,6 +2943,7 @@ function profiloPageHtml(env) {
   <div id="stateActive" style="display:none;">
     <div class="card">
       <div id="pastDueBanner" style="display:none;" class="banner warn">Il pagamento più recente non è riuscito. Aggiorna il metodo di pagamento dal portale entro pochi giorni, altrimenti l'abbonamento verrà sospeso.</div>
+      <div id="cancelScheduledBanner" style="display:none;" class="banner off">Cessazione programmata: l'abbonamento resta attivo fino alla scadenza già pagata, poi non si rinnova. Puoi annullare la cessazione dal portale.</div>
       <h2>Stato abbonamento</h2>
       <div class="row"><span class="k">Stato</span><span class="v" id="subStatus"></span></div>
       <div class="row"><span class="k">Scadenza</span><span class="v" id="subPeriodEnd"></span></div>
@@ -2967,7 +3015,7 @@ async function handleProMe(request, env) {
   const email = payload.email;
 
   const sub = await env.DB.prepare(
-    `SELECT id, status, current_period_end, price_cents, created_at, canceled_at, segment, region
+    `SELECT id, status, current_period_end, price_cents, created_at, canceled_at, segment, region, cancel_at_period_end
      FROM pro_subscriptions WHERE email = ? ORDER BY created_at DESC LIMIT 1`
   ).bind(email).first().catch(() => null);
 
@@ -2990,6 +3038,7 @@ async function handleProMe(request, env) {
     subscription: sub ? {
       status: sub.status, period_end: sub.current_period_end, price_cents: sub.price_cents,
       created_at: sub.created_at, canceled_at: sub.canceled_at,
+      cancel_at_period_end: !!sub.cancel_at_period_end,
     } : null,
     events,
     usage: { month: ym, used: usedRow?.c || 0, quota },
@@ -3191,7 +3240,7 @@ async function handleAdminProSubscribersList(env) {
   const ym = dayRome().slice(0, 7);
   try {
     const { results } = await env.DB.prepare(
-      `SELECT id, email, status, current_period_end, price_cents, pricing_id, discount_code, segment, region, created_at, canceled_at
+      `SELECT id, email, status, current_period_end, price_cents, pricing_id, discount_code, segment, region, created_at, canceled_at, cancel_at_period_end
        FROM pro_subscriptions ORDER BY created_at DESC`
     ).all();
     const subs = [];
