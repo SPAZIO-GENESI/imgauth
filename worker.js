@@ -2743,7 +2743,14 @@ async function handleProSubscriptionUpdated(event, env, ctx) {
   const sub = event.data.object;
   const subscriptionId = sub.id;
   if (!env?.DB) return;
-  const scheduled = sub.cancel_at_period_end === true;
+  // `cancel_at_period_end` risulta SEMPRE false in questa versione API
+  // (scoperto nel collaudo reale in produzione, 2026-07-17): con billing_mode
+  // "flexible" Stripe usa `cancel_at` (una data specifica, non più legata
+  // implicitamente alla sola fine periodo) come fonte di verità della
+  // cancellazione programmata; `canceled_at`, se presente, registra quando è
+  // stata RICHIESTA la cancellazione, non quando prende effetto — non è un
+  // segnale di stato "cessato" (quello resta solo `status`/`.deleted`).
+  const scheduled = sub.cancel_at != null;
   const now = Date.now();
 
   let result;
