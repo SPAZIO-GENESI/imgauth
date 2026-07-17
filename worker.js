@@ -2768,6 +2768,19 @@ async function handleProSubscriptionUpdated(event, env, ctx) {
   if (!row) return;
 
   const periodEnd = subscriptionPeriodEndMs(sub);
+
+  // Filtro cosmetico per la bacheca utente (P27, 17/7): il portale Stripe fa
+  // più chiamate interne per un singolo click "Cancella" e manda quindi PIÙ
+  // eventi customer.subscription.updated reali e distinti a pochi secondi di
+  // distanza, tutti con `cancel_at` valorizzato — nessun bug di duplicazione
+  // (ON CONFLICT(id) protegge già dal replay del MEDESIMO evento), solo
+  // rumore visivo. Se esiste già un 'cancel_scheduled' recente (60s) per
+  // questa subscription, non se ne registra un secondo.
+  const recentDup = await env.DB.prepare(
+    `SELECT 1 FROM pro_events WHERE subscription_id = ? AND type = 'cancel_scheduled' AND ts > ? LIMIT 1`
+  ).bind(row.id, now - 60000).first().catch(() => null);
+  if (recentDup) return;
+
   try {
     await env.DB.prepare(
       `INSERT INTO pro_events (id, subscription_id, ts, type, detail) VALUES (?, ?, ?, 'cancel_scheduled', ?)
