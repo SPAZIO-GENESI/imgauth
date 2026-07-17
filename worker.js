@@ -339,19 +339,28 @@ function base64UrlToBytes(b64url) {
   return bytes;
 }
 
+// TELEGRAM_CHAT_ID può contenere più chat id separati da virgola (destinatari multipli
+// dello stesso allarme/notifica): un secret solo, nessun nuovo binding.
+function telegramChatIds(env) {
+  const raw = env?.TELEGRAM_CHAT_ID;
+  if (!raw) return [];
+  return String(raw).split(",").map((s) => s.trim()).filter(Boolean);
+}
+
 // Invio Telegram best-effort (fail-safe: un errore qui non deve mai propagarsi).
 // Usato dagli allarmi P21 §2.5; notifyCertProduced ha il proprio invio inline
 // (comportamento pre-esistente, non toccato).
 async function sendTelegram(env, text) {
-  const token = env?.TELEGRAM_BOT_TOKEN, chat = env?.TELEGRAM_CHAT_ID;
-  if (!token || !chat) return;
-  try {
-    await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+  const token = env?.TELEGRAM_BOT_TOKEN;
+  const chats = telegramChatIds(env);
+  if (!token || !chats.length) return;
+  await Promise.all(chats.map((chat) =>
+    fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ chat_id: chat, text, disable_web_page_preview: true }),
-    });
-  } catch { /* notifica best-effort */ }
+    }).catch(() => { /* notifica best-effort */ })
+  ));
 }
 
 // Contatore giornaliero (R2, come meta/cert-count) dei 403 su credenziali agente:
@@ -4214,8 +4223,9 @@ async function handleHealthLog(url, env) {
 // post-risposta (ctx.waitUntil): un errore qui non blocca l'emissione.
 // Segreti TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID come Cloudflare secrets.
 async function notifyCertProduced(env, sha256, meta, tsHuman) {
-  const token = env?.TELEGRAM_BOT_TOKEN, chat = env?.TELEGRAM_CHAT_ID;
-  if (!token || !chat || !env?.PDF_ARCHIVE) return;
+  const token = env?.TELEGRAM_BOT_TOKEN;
+  const chats = telegramChatIds(env);
+  if (!token || !chats.length || !env?.PDF_ARCHIVE) return;
   const every = Math.max(1, parseInt(env.CERT_NOTIFY_EVERY || "1", 10) || 1);
 
   // Contatore in R2 (read-modify-write; a basso traffico le race sono trascurabili).
@@ -4236,12 +4246,12 @@ async function notifyCertProduced(env, sha256, meta, tsHuman) {
   righe.push(`Totale emessi: ${count}${every > 1 ? ` · avviso ogni ${every}` : ""}`);
   righe.push("", `🕓 ${tsHuman || new Date().toISOString()}`);
 
-  try {
-    await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+  await Promise.all(chats.map((chat) =>
+    fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ chat_id: chat, text: righe.join("\n"), disable_web_page_preview: true }),
-    });
-  } catch { /* notifica best-effort */ }
+    }).catch(() => { /* notifica best-effort */ })
+  ));
 }
 
