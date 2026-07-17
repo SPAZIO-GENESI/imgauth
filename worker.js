@@ -100,6 +100,13 @@ const DEV_OWNER_RETENTION_MS  = 180 * 24 * 60 * 60 * 1000;   // 180 giorni post-
 // un cookie né una riga D1): 8 ore, come da design.
 const VOUCHER_TTL_MS = 8 * 60 * 60 * 1000;
 
+// ── Fascia Professionale — abbonamento (P27) ────────────────────────────────
+// Parametri tarabili (vedi P27-DESIGN-professionale.md §4/§6). La quota vera
+// viene da env.PRO_MONTHLY_QUOTA ([vars] in wrangler.toml, da FASE 4); questi
+// sono i fallback per l'ambiente locale.
+const PRO_MONTHLY_QUOTA_DEFAULT = 200; // attestazioni/mese
+const PRO_GRACE_DAYS_DEFAULT    = 3;   // tolleranza oltre current_period_end (retry Stripe)
+
 // Endpoint OAuth "verifica email one-shot" (authorization code, scope openid
 // email): niente login/sessione, l'access token si usa per UNA chiamata a
 // userinfo e si scarta (vedi invariante 4 nel design). clientIdVar/clientSecretVar
@@ -389,7 +396,7 @@ async function authenticateAgent(request, env, ctx) {
   let row;
   try {
     row = await env.DB.prepare(
-      `SELECT id, kind, secret_hash, label, quota, used, period, expires_at, revoked, convention_id, owner_email
+      `SELECT id, kind, secret_hash, label, quota, used, period, expires_at, revoked, convention_id, owner_email, channel
        FROM agent_credentials WHERE id = ?`
     ).bind(id).first();
   } catch {
@@ -449,7 +456,13 @@ async function authenticateAgent(request, env, ctx) {
     }
   }
 
-  return { ok: true, id, conventionId: row.convention_id || null, ownerEmail: row.owner_email || null };
+  // P27 §5: canale di produzione. Le sessioni da device flow sono SEMPRE 'mcp'
+  // (calcolato, non letto — non serve popolare la colonna per quel kind); le
+  // chiavi leggono la colonna `channel` (default 'api', 'telegram' solo per
+  // la chiave dedicata del bot).
+  const channel = kind === "session" ? "mcp" : (row.channel || "api");
+
+  return { ok: true, id, conventionId: row.convention_id || null, ownerEmail: row.owner_email || null, channel };
 }
 
 // ── Device flow (autorizzazione umana una-tantum per MCP, P21) ──────────────
@@ -821,7 +834,7 @@ async function verifyVoucher(env, token) {
 // silenziosamente a fascia Base con motivo esplicito (vedi §1/§2.4 design).
 // Ritorna { fascia: null, ... } se conventionId è assente/la convenzione non
 // esiste più (D1 cancellata a mano) — il chiamante mantiene il proprio default.
-async function accountConventionUsage(env, ctx, { conventionId, memberEmail, credentialId, via, sha256 }) {
+async function accountConventionUsage(env, ctx, { conventionId, memberEmail, credentialId, via, sha256, channel }) {
   if (!conventionId || !env?.DB) return { fascia: null, fasciaMotivo: null, convenzioneInfo: null };
   const ym = dayRome().slice(0, 7); // 'YYYY-MM' Europe/Rome
   try {
@@ -848,13 +861,62 @@ async function accountConventionUsage(env, ctx, { conventionId, memberEmail, cre
 
     if (ctx && typeof ctx.waitUntil === "function") {
       ctx.waitUntil(env.DB.prepare(
-        `INSERT INTO convention_attestations (convention_id, member_email, credential_id, via, sha256, ym, ts)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`
-      ).bind(conv.id, memberEmail, credentialId || null, via, sha256, ym, Date.now()).run().catch(() => {}));
+        `INSERT INTO convention_attestations (convention_id, member_email, credential_id, via, sha256, ym, ts, channel)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(conv.id, memberEmail, credentialId || null, via, sha256, ym, Date.now(), channel || null).run().catch(() => {}));
     }
     return { fascia: "convenzione", fasciaMotivo: null, convenzioneInfo: { id: conv.id, name: conv.name } };
   } catch {
     return { fascia: null, fasciaMotivo: null, convenzioneInfo: null }; // fail-open
+  }
+}
+
+// P27: match email → abbonamento Professionale attivo. `past_due` è ancora
+// valido finché non supera la tolleranza (PRO_GRACE_DAYS: copre i retry di
+// pagamento Stripe prima che l'abbonamento diventi definitivamente 'canceled').
+// Fail-open sugli errori D1, stesso principio di matchConvention: mai un 500
+// sull'emissione per un problema di lookup.
+async function matchProSubscription(env, email) {
+  if (!env?.DB || !email) return null;
+  const graceMs = (Number(env?.PRO_GRACE_DAYS) || PRO_GRACE_DAYS_DEFAULT) * 24 * 60 * 60 * 1000;
+  const now = Date.now();
+  try {
+    const row = await env.DB.prepare(
+      `SELECT id, current_period_end FROM pro_subscriptions
+       WHERE email = ? AND status IN ('active','past_due')
+       ORDER BY created_at DESC LIMIT 1`
+    ).bind(email).first();
+    if (!row) return null;
+    if (row.current_period_end + graceMs < now) return null;
+    return { id: row.id };
+  } catch {
+    return null; // fail-open
+  }
+}
+
+// P27: contabilità del pacchetto mensile Professionale — stesso principio di
+// accountConventionUsage: mai un blocco, quota esaurita degrada a Base con
+// motivo esplicito. Finestra mensile Europe/Rome (dayRome), stesso pattern
+// di indicizzazione di convention_attestations.
+async function accountProUsage(env, ctx, { subscriptionId, email, channel, sha256 }) {
+  if (!subscriptionId || !env?.DB) return { fascia: null, fasciaMotivo: null };
+  const quota = Number(env?.PRO_MONTHLY_QUOTA) || PRO_MONTHLY_QUOTA_DEFAULT;
+  const ym = dayRome().slice(0, 7);
+  try {
+    const usedRow = await env.DB.prepare(
+      `SELECT COUNT(*) AS c FROM pro_attestations WHERE email = ? AND ym = ?`
+    ).bind(email, ym).first();
+    const used = usedRow?.c || 0;
+    if (used >= quota) return { fascia: "base", fasciaMotivo: "quota_professionale_esaurita" };
+
+    if (ctx && typeof ctx.waitUntil === "function") {
+      ctx.waitUntil(env.DB.prepare(
+        `INSERT INTO pro_attestations (email, sha256, channel, ym, ts) VALUES (?, ?, ?, ?, ?)`
+      ).bind(email, sha256, channel || null, ym, Date.now()).run().catch(() => {}));
+    }
+    return { fascia: "professionale", fasciaMotivo: null };
+  } catch {
+    return { fascia: null, fasciaMotivo: null }; // fail-open
   }
 }
 
@@ -1745,7 +1807,12 @@ async function handleHash(request, env, ctx) {
       hmacSig = await signHmac(env.HMAC_SECRET, hmacMessage(attestazione, meta));
     }
 
-    // ── P25 (B)+(C): fascia + contabilità convenzione ───────────────────────
+    // ── Canale di produzione (P27 §5) ───────────────────────────────────────
+    // web = voucher o percorso anonimo/Turnstile; mcp = session token da device
+    // flow; api/telegram = chiave sg_k_, letti dalla credenziale (authenticateAgent).
+    const channel = agentAuth && agentAuth.ok ? agentAuth.channel : "web";
+
+    // ── P25 (B)+(C) + P27: fascia, contabilità convenzione e Professionale ──
     // Stessa timing della quota individuale (authenticateAgent): l'emissione
     // dell'attestazione è il momento in cui il "consumo" avviene, non la
     // successiva generazione del PDF. Nessuna credenziale/voucher → fascia
@@ -1755,11 +1822,18 @@ async function handleHash(request, env, ctx) {
     // convenzione → pool/tetto individuale via accountConventionUsage, mai
     // un blocco: esaurito uno dei due argini, l'emissione degrada
     // silenziosamente a Base con motivo esplicito (mai negata, vedi §1).
+    // Catena di precedenza P27 (decisione gestore 17/7): convenzione →
+    // professionale → base. Il pacchetto personale pagato NON si consuma se
+    // la convenzione dell'ente è già valida per questa richiesta; se la
+    // convenzione manca o è esaurita, si prova l'abbonamento Professionale
+    // legato all'email (chiave self-service con owner_email, o voucher).
     let fascia = "base";
     let fasciaMotivo = null;
     let convenzioneInfo = null;
+    let email = null; // email da verificare per l'abbonamento Professionale
     if (agentAuth && agentAuth.ok) {
       fascia = "sviluppatore";
+      email = agentAuth.ownerEmail;
       if (agentAuth.conventionId) {
         const acc = await accountConventionUsage(env, ctx, {
           conventionId: agentAuth.conventionId,
@@ -1767,6 +1841,7 @@ async function handleHash(request, env, ctx) {
           credentialId: agentAuth.id,
           via:          "key",
           sha256:       digest,
+          channel,
         });
         if (acc.fascia) {
           fascia = acc.fascia;
@@ -1776,6 +1851,7 @@ async function handleHash(request, env, ctx) {
       }
     } else if (voucherAuth) {
       fascia = "base";
+      email = voucherAuth.email;
       if (voucherAuth.conventionId) {
         const acc = await accountConventionUsage(env, ctx, {
           conventionId: voucherAuth.conventionId,
@@ -1783,11 +1859,22 @@ async function handleHash(request, env, ctx) {
           credentialId: null,
           via:          "site",
           sha256:       digest,
+          channel,
         });
         if (acc.fascia) {
           fascia = acc.fascia;
           fasciaMotivo = acc.fasciaMotivo;
           convenzioneInfo = acc.convenzioneInfo;
+        }
+      }
+    }
+    if (fascia !== "convenzione" && email) {
+      const sub = await matchProSubscription(env, email);
+      if (sub) {
+        const accPro = await accountProUsage(env, ctx, { subscriptionId: sub.id, email, channel, sha256: digest });
+        if (accPro.fascia) {
+          fascia = accPro.fascia;
+          fasciaMotivo = accPro.fasciaMotivo;
         }
       }
     }
@@ -2036,25 +2123,28 @@ async function peekAgentCredential(request, env) {
   let row;
   try {
     row = await env.DB.prepare(
-      `SELECT id, kind, secret_hash, revoked, convention_id FROM agent_credentials WHERE id = ?`
+      `SELECT id, kind, secret_hash, revoked, convention_id, owner_email, channel FROM agent_credentials WHERE id = ?`
     ).bind(id).first();
   } catch { return null; }
   if (!row || row.kind !== kind || row.revoked) return null;
   const secretHash = await sha256Hex(secret);
   if (!timingSafeEqualHex(secretHash, row.secret_hash)) return null;
-  return { id: row.id, conventionId: row.convention_id || null };
+  const channel = kind === "session" ? "mcp" : (row.channel || "api");
+  return { id: row.id, conventionId: row.convention_id || null, ownerEmail: row.owner_email || null, channel };
 }
 
 // Equivalente di peekAgentCredential per il voucher dal sito (P25 §2.7): sola
 // lettura, nessun consumo di quota (già applicato in handleHash). Rilegge la
 // convenzione fresca da D1, stesso principio di verifyVoucher in handleHash.
+// P27: include anche l'email (serve a peekare l'eventuale abbonamento
+// Professionale in handlePdf, stessa logica del canale 'web' per questo percorso).
 async function peekVoucherConvention(request, env) {
   const token = request.headers.get("X-SG-Voucher") || "";
   if (!token) return null;
   const payload = await verifyVoucher(env, token);
   if (!payload) return null;
   const conv = await matchConvention(env, payload.email);
-  return { conventionId: conv ? conv.id : null };
+  return { email: payload.email, conventionId: conv ? conv.id : null };
 }
 
 async function handlePdf(request, env, ctx) {
@@ -2147,25 +2237,40 @@ async function handlePdf(request, env, ctx) {
       // già stampati e vincolati. Best-effort e idempotente — scritto SOLO alla
       // prima emissione, così la pagina riflette la data più antica (coerente con
       // /api/cert e la prova .ots). Un errore qui non compromette l'emissione.
-      // P25 (B)+(C): tier ricalcolato dalla credenziale bearer O dal voucher
+      // P25 (B)+(C)+P27: tier ricalcolato dalla credenziale bearer O dal voucher
       // inviati su QUESTA richiesta (peekAgentCredential/peekVoucherConvention,
       // sola lettura) — mai da un campo `fascia` nel JSON del client, stesso
       // principio del token HMAC. Approssimazione nota: riflette l'appartenenza
-      // STATICA della credenziale/voucher alla convenzione, non l'esito
-      // pool/tetto calcolato al momento di /api/hash (quello resta la fonte
-      // di verità per contabilità e log).
+      // STATICA della credenziale/voucher alla convenzione/abbonamento, non
+      // l'esito pool/tetto/quota calcolato al momento di /api/hash (quello
+      // resta la fonte di verità per contabilità e log). Stessa precedenza
+      // convenzione → professionale → base di handleHash.
       const cred = await peekAgentCredential(request, env);
-      let tier, tierConventionId;
+      let tier, tierConventionId, channel;
       if (cred) {
-        tier = cred.conventionId ? "convenzione" : "sviluppatore";
-        tierConventionId = cred.conventionId || null;
+        channel = cred.channel;
+        if (cred.conventionId) {
+          tier = "convenzione";
+          tierConventionId = cred.conventionId;
+        } else {
+          const sub = cred.ownerEmail ? await matchProSubscription(env, cred.ownerEmail) : null;
+          tier = sub ? "professionale" : "sviluppatore";
+          tierConventionId = null;
+        }
       } else {
         const voucherConv = await peekVoucherConvention(request, env);
-        tier = voucherConv?.conventionId ? "convenzione" : "base";
-        tierConventionId = voucherConv?.conventionId || null;
+        channel = "web";
+        if (voucherConv?.conventionId) {
+          tier = "convenzione";
+          tierConventionId = voucherConv.conventionId;
+        } else {
+          const sub = voucherConv?.email ? await matchProSubscription(env, voucherConv.email) : null;
+          tier = sub ? "professionale" : "base";
+          tierConventionId = null;
+        }
       }
       if (ctx && typeof ctx.waitUntil === "function") {
-        ctx.waitUntil(writeCertMeta(env, sha256.toLowerCase(), d, meta, tier, tierConventionId));
+        ctx.waitUntil(writeCertMeta(env, sha256.toLowerCase(), d, meta, tier, tierConventionId, channel));
       }
     }
 
@@ -2411,7 +2516,7 @@ async function handleCert(url, env) {
 
 // Sidecar di metadati per la pagina /c/<hash>: i soli campi già stampati sul
 // certificato. Idempotente: preserva la PRIMA emissione. Best-effort.
-async function writeCertMeta(env, hash, d, meta, tier, conventionId) {
+async function writeCertMeta(env, hash, d, meta, tier, conventionId, channel) {
   const key = `meta/cert/${hash}.json`;
   try {
     if (await env.PDF_ARCHIVE.head(key)) return;
@@ -2429,6 +2534,7 @@ async function writeCertMeta(env, hash, d, meta, tier, conventionId) {
       note: meta?.note || "",
       tier: tier || "base",
       convention_id: conventionId || null,
+      channel: channel || null,
     };
     await env.PDF_ARCHIVE.put(key, JSON.stringify(payload), {
       httpMetadata: { contentType: "application/json; charset=utf-8" },
