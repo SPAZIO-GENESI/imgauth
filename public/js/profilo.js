@@ -64,7 +64,27 @@
 
   var certsPage = 1;
 
+  function renderIdentity(data) {
+    document.getElementById("identityEmail").textContent = data.email || "—";
+    var convRow = document.getElementById("identityConventionRow");
+    if (data.convention) {
+      document.getElementById("identityConvention").textContent = data.convention.name + " — valida fino al " + fmtDate(data.convention.ends_at);
+      convRow.style.display = "";
+    } else {
+      convRow.style.display = "none";
+    }
+    var keyRow = document.getElementById("identityApiKeyRow");
+    if (data.api_key) {
+      document.getElementById("identityApiKey").textContent = "attiva, " + data.api_key.used + " / " + data.api_key.quota + " questo mese";
+      keyRow.style.display = "";
+    } else {
+      keyRow.style.display = "none";
+    }
+    document.getElementById("identityBar").style.display = "";
+  }
+
   function renderMe(data) {
+    renderIdentity(data);
     if (!data.subscription) {
       var pricing = data.pricing;
       document.getElementById("onboardPrice").textContent = pricing
@@ -153,7 +173,7 @@
   document.getElementById("certsPrevBtn").addEventListener("click", function () { if (certsPage > 1) loadCertificates(certsPage - 1); });
   document.getElementById("certsNextBtn").addEventListener("click", function () { loadCertificates(certsPage + 1); });
 
-  function doLogout() { clearVoucher(); showState("anon"); }
+  function doLogout() { clearVoucher(); document.getElementById("identityBar").style.display = "none"; showState("anon"); }
   document.getElementById("logoutBtnOnboard").addEventListener("click", doLogout);
   document.getElementById("logoutBtnActive").addEventListener("click", doLogout);
   document.getElementById("logoutBtnCanceled").addEventListener("click", doLogout);
