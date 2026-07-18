@@ -1803,7 +1803,9 @@ export default {
       if (await isRateLimited(env.RL_CERT, ip)) return tooManyResponse();
     } else if (method === "POST" && (path === "/api/hash" || path === "/api/verify" || path === "/api/agent/authorize" || path === "/api/agent/approve")) {
       if (await isRateLimited(env.RL_API, ip)) return tooManyResponse();
-    } else if (method === "GET" && (path === "/api/ots" || path === "/api/cert" || path === "/api/badge" || path === "/api/agent/token")) {
+    } else if (method === "GET" && (path === "/api/ots" || path === "/api/cert" || path === "/api/badge" || path === "/api/agent/token" || path === "/api/badge/integration")) {
+      if (await isRateLimited(env.RL_API, ip)) return tooManyResponse();
+    } else if (method === "GET" && (path === "/integrazioni" || path.startsWith("/integrazioni/logo/"))) {
       if (await isRateLimited(env.RL_API, ip)) return tooManyResponse();
     } else if (method === "GET" && (path === "/developer/keys" || path === "/api/dev/oauth/start" || path.startsWith("/api/dev/oauth/callback/"))) {
       if (await isRateLimited(env.RL_API, ip)) return tooManyResponse();
@@ -1824,6 +1826,12 @@ export default {
     if (method === "GET"  && path === "/api/ots")      return handleOts(url, env);
     if (method === "GET"  && path === "/api/cert")     return handleCert(url, env);
     if (method === "GET"  && path === "/api/badge")    return handleBadge(url, env);
+    if (method === "GET"  && path === "/api/badge/integration") return handleIntegrationBadge(url, env);
+    if (method === "GET"  && path === "/integrazioni") return handleIntegrationsPage(env);
+    if (method === "GET"  && path.startsWith("/integrazioni/logo/")) {
+      const id = path.slice("/integrazioni/logo/".length);
+      return handleIntegrationsLogoPublic(env, id);
+    }
     if (method === "GET"  && path === "/api/status")   return withPublicCors(await handleStatus(env, ctx));
     if (method === "GET"  && path === "/api/status-history") return withPublicCors(await handleStatusHistory(env, ctx));
     if (method === "GET"  && path === "/api/health-log") return withPublicCors(await handleHealthLog(url, env));
@@ -3196,6 +3204,16 @@ function profiloPageHtml(env) {
       <div class="actions"><button class="btn" id="intLogoBtn" type="button">Carica logo</button></div>
       <p class="msg" id="intLogoMsg"></p>
     </div>
+    <div id="intBadgeSection" style="display:none;margin-top:1rem;border-top:1px solid var(--line);padding-top:1rem;">
+      <h2 style="font-size:1rem;">Badge "Funziona con Attestazione Spazio Genesi"</h2>
+      <p class="muted">Pubblicata: copia lo snippet per il tuo sito o repository.</p>
+      <label for="intBadgeHtml">HTML</label>
+      <textarea id="intBadgeHtml" readonly rows="2" style="width:100%;font-family:ui-monospace,Consolas,monospace;font-size:.78rem;"></textarea>
+      <div class="actions"><button class="btn" id="intBadgeHtmlCopy" type="button">Copia HTML</button></div>
+      <label for="intBadgeMd" style="margin-top:.6rem;">Markdown</label>
+      <textarea id="intBadgeMd" readonly rows="2" style="width:100%;font-family:ui-monospace,Consolas,monospace;font-size:.78rem;"></textarea>
+      <div class="actions"><button class="btn" id="intBadgeMdCopy" type="button">Copia Markdown</button></div>
+    </div>
   </div>
 
   <div class="card" id="stateCanceled" style="display:none;">
@@ -3450,6 +3468,7 @@ async function handleProIntegration(request, env, ctx) {
     } catch {
       return jsonResponse({ error: "Errore interno." }, 500);
     }
+    _integrationsCache = null;
     return jsonResponse({ ok: true, status: "removed" });
   }
 
@@ -3480,6 +3499,7 @@ async function handleProIntegration(request, env, ctx) {
   } catch {
     return jsonResponse({ error: "Errore interno." }, 500);
   }
+  _integrationsCache = null;
   if (ctx && typeof ctx.waitUntil === "function") {
     ctx.waitUntil(sendTelegram(env, `🧩 Nuova candidatura vetrina Integrazioni: "${appName}" (${email}) — in attesa di revisione su /admin.`).catch(() => {}));
   }
@@ -3525,6 +3545,7 @@ async function handleProIntegrationLogo(request, env) {
   } catch {
     return jsonResponse({ error: "Errore interno." }, 500);
   }
+  _integrationsCache = null;
   return jsonResponse({ ok: true, status: "pending" });
 }
 
@@ -3609,6 +3630,7 @@ async function handleAdminIntegrationsUpdate(request, env, id) {
   } catch {
     return jsonResponse({ error: "Errore interno." }, 500);
   }
+  _integrationsCache = null;
   return jsonResponse({ ok: true });
 }
 
@@ -3858,6 +3880,7 @@ async function handleAdminProSubscribersForget(request, env, id) {
   } catch {
     return jsonResponse({ error: "Errore interno." }, 500);
   }
+  _integrationsCache = null;
 
   let pdfsDeleted = 0;
   if (deletableHashes.length && env?.PDF_ARCHIVE) {
@@ -4394,6 +4417,138 @@ async function handleBadge(url, env) {
   return attested
     ? badgeResponse(badgeSvg("✓ opera attestata", "#8B6914"), 86400)
     : badgeResponse(badgeSvg("non attestata", "#9aa0a6"), 60);
+}
+
+// ── Vetrina Integrazioni: pagina pubblica, logo, badge (P28 FASE 3) ─────────
+
+// Badge a fascia singola (a differenza di badgeSvg, che è un due-caselle
+// "Spazio Genesi | valore" pensato per un valore breve): qui il testo è
+// l'intera frase, serve una sola casella colorata larga a misura.
+function integrationBadgeSvg(ok) {
+  const text = ok ? "✓ Funziona con Attestazione Spazio Genesi" : "Integrazione non verificata";
+  const color = ok ? "#8B6914" : "#9aa0a6";
+  const W = Math.max(180, Math.round(text.length * 6.4) + 24);
+  const H = 28;
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" role="img" aria-label="${escHtml(text)}">
+  <rect width="${W}" height="${H}" rx="4" fill="${color}"/>
+  <text x="${W / 2}" y="18" font-family="Verdana,Geneva,DejaVu Sans,sans-serif" font-size="11" fill="#fff" text-anchor="middle">${escHtml(text)}</text>
+</svg>`;
+}
+
+// GET /api/badge/integration?id=<id> — mai un errore HTTP (rompe l'<img>):
+// id malformato o candidatura non approvata → badge grigio, mai un 404/500.
+async function handleIntegrationBadge(url, env) {
+  const id = String(url.searchParams.get("id") ?? "");
+  if (!/^int_[0-9a-f]{8}$/.test(id)) {
+    return badgeResponse(integrationBadgeSvg(false), 60);
+  }
+  let approved = false;
+  if (env?.DB) {
+    try {
+      const row = await env.DB.prepare(`SELECT status FROM integrations WHERE id = ?`).bind(id).first();
+      approved = row?.status === "approved";
+    } catch {
+      approved = false;
+    }
+  }
+  return approved ? badgeResponse(integrationBadgeSvg(true), 86400) : badgeResponse(integrationBadgeSvg(false), 60);
+}
+
+// GET /integrazioni/logo/<id> — pubblico ma SOLO per candidature approvate
+// (gotcha §8.6 del design: il logo di una candidatura non approvata non deve
+// essere raggiungibile, non ci si affida all'oscurità della chiave R2).
+async function handleIntegrationsLogoPublic(env, id) {
+  if (!env?.DB || !env?.PDF_ARCHIVE) return new Response("Servizio non disponibile.", { status: 503 });
+  const row = await env.DB.prepare(`SELECT logo_key, status FROM integrations WHERE id = ?`).bind(id).first().catch(() => null);
+  if (!row || row.status !== "approved" || !row.logo_key) return new Response("Non trovato.", { status: 404 });
+  const obj = await env.PDF_ARCHIVE.get(row.logo_key);
+  if (!obj) return new Response("Non trovato.", { status: 404 });
+  return new Response(obj.body, {
+    headers: { "Content-Type": obj.httpMetadata?.contentType || "application/octet-stream", "Cache-Control": "public, max-age=86400" },
+  });
+}
+
+// Cache per-isolate 60s (stesso principio di _statusCache): la vetrina cambia
+// solo quando il gestore approva/rimuove una candidatura, non serve leggere
+// D1 a ogni visita.
+let _integrationsCache = null; // { rows, ts }
+const INTEGRATIONS_CACHE_TTL = 60000;
+
+async function listApprovedIntegrations(env) {
+  if (_integrationsCache && (Date.now() - _integrationsCache.ts) < INTEGRATIONS_CACHE_TTL) {
+    return _integrationsCache.rows;
+  }
+  let rows = [];
+  if (env?.DB) {
+    try {
+      const { results } = await env.DB.prepare(
+        `SELECT id, app_name, url, description, logo_key FROM integrations WHERE status = 'approved' ORDER BY reviewed_at DESC`
+      ).all();
+      rows = results || [];
+    } catch {
+      rows = [];
+    }
+  }
+  _integrationsCache = { rows, ts: Date.now() };
+  return rows;
+}
+
+// GET /integrazioni — vetrina pubblica (stesso pattern server-rendered di
+// /profilo e /developer/keys, ma qui il contenuto è pubblico e va nel
+// documento stesso: niente route Cloudflare nuova, zero JS inline).
+async function handleIntegrationsPage(env) {
+  const rows = await listApprovedIntegrations(env);
+  const cards = rows.map(r => `
+    <div class="intcard">
+      ${r.logo_key ? `<img class="intlogo" src="/integrazioni/logo/${escHtml(r.id)}" alt="" loading="lazy">` : `<div class="intlogo intlogo-ph" aria-hidden="true"></div>`}
+      <h2>${escHtml(r.app_name)}</h2>
+      <p>${escHtml(r.description)}</p>
+      <a href="${escHtml(r.url)}" target="_blank" rel="noopener nofollow">${escHtml(r.url)}</a>
+    </div>`).join("");
+
+  const html = `<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Integrazioni e applicazioni — Spazio Genesi</title>
+<meta name="description" content="Applicazioni di terzi che integrano l'attestazione Spazio Genesi.">
+<style>
+  :root { --oro:#8B6914; --bg:#faf8f4; --card:#fff; --ink:#1f1d18; --muted:#6b6453; --line:#e7e1d4; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    line-height:1.55; padding:1.5rem; }
+  .wrap { max-width:1000px; margin:0 auto; }
+  h1 { font-size:1.6rem; margin:.2rem 0 .5rem; }
+  .lead { font-size:1rem; }
+  .muted { color:var(--muted); font-size:.9rem; }
+  a { color:var(--oro); }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(260px, 1fr)); gap:1rem; margin-top:1.5rem; }
+  .intcard { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:1.2rem;
+    box-shadow:0 1px 3px rgba(0,0,0,.04); }
+  .intcard h2 { font-size:1rem; margin:.6rem 0 .4rem; }
+  .intcard p { font-size:.88rem; color:var(--ink); margin:.2rem 0 .6rem; }
+  .intcard a { font-size:.82rem; word-break:break-all; }
+  .intlogo { width:48px; height:48px; object-fit:contain; border-radius:8px; background:#fff; border:1px solid var(--line); }
+  .intlogo-ph { background:#f2f0ea; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Integrazioni e applicazioni</h1>
+  <p class="lead">${rows.length} applicazion${rows.length === 1 ? "e" : "i"} di terzi integra${rows.length === 1 ? "" : "no"} l'attestazione Spazio Genesi.
+     La presenza qui non è una certificazione del software: verifica sempre autonomamente prima di usarlo.</p>
+  <p class="muted">Hai costruito un'integrazione? <a href="/profilo">Candidala dal tuo profilo</a>.</p>
+  <div class="grid">${cards || '<p class="muted">Nessuna integrazione pubblicata ancora.</p>'}</div>
+</div>
+</body>
+</html>`;
+
+  return new Response(html, {
+    status: 200,
+    headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "public, max-age=60", ...corsHeaders() },
+  });
 }
 
 // ── /api/status — stato semaforico dei servizi ────────────────────────────────

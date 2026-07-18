@@ -147,18 +147,40 @@
     document.getElementById("intAppName").value = integ ? (integ.app_name || "") : "";
     document.getElementById("intUrl").value = integ ? (integ.url || "") : "";
     document.getElementById("intDescription").value = integ ? (integ.description || "") : "";
+    var badgeSection = document.getElementById("intBadgeSection");
     if (integ) {
       banner.textContent = INTEGRATION_STATUS_LABELS[integ.status] || integ.status;
       banner.className = "banner " + (integ.status === "approved" ? "off" : "warn");
       banner.style.display = "";
       withdrawBtn.style.display = integ.status === "removed" ? "none" : "";
       logoSection.style.display = integ.status === "removed" ? "none" : "";
+      if (integ.status === "approved") {
+        var badgeUrl = "https://imgauth.spaziogenesi.org/api/badge/integration?id=" + integ.id;
+        var pageUrl = "https://imgauth.spaziogenesi.org/integrazioni";
+        document.getElementById("intBadgeHtml").value =
+          '<a href="' + pageUrl + '"><img src="' + badgeUrl + '" alt="Funziona con Attestazione Spazio Genesi"></a>';
+        document.getElementById("intBadgeMd").value =
+          '[![Funziona con Attestazione Spazio Genesi](' + badgeUrl + ')](' + pageUrl + ')';
+        badgeSection.style.display = "";
+      } else {
+        badgeSection.style.display = "none";
+      }
     } else {
       banner.style.display = "none";
       withdrawBtn.style.display = "none";
       logoSection.style.display = "none";
+      badgeSection.style.display = "none";
     }
   }
+
+  function copyFromTextarea(id) {
+    var ta = document.getElementById(id);
+    ta.select();
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(ta.value).catch(function () {});
+    else document.execCommand("copy");
+  }
+  document.getElementById("intBadgeHtmlCopy").addEventListener("click", function () { copyFromTextarea("intBadgeHtml"); });
+  document.getElementById("intBadgeMdCopy").addEventListener("click", function () { copyFromTextarea("intBadgeMd"); });
 
   function loadIntegration() {
     api("/api/pro/integration").then(renderIntegration).catch(function () {});
