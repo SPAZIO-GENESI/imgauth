@@ -1806,7 +1806,7 @@ export default {
     if (method === "GET"  && path === "/api/cert")     return handleCert(url, env);
     if (method === "GET"  && path === "/api/badge")    return handleBadge(url, env);
     if (method === "GET"  && path === "/api/badge/integration") return handleIntegrationBadge(url, env);
-    if (method === "GET"  && path === "/integrazioni") return handleIntegrationsPage(env); // P29 passo A: 301 arriva nel passo B, vedi commento sopra la funzione
+    if (method === "GET"  && path === "/integrazioni") return permanentRedirect("https://attestazione.spaziogenesi.org/integrazioni/");
     if (method === "GET"  && path === "/api/integrations") return withPublicCors(await handleIntegrationsApi(env));
     if (method === "GET"  && path.startsWith("/integrazioni/logo/")) {
       const id = path.slice("/integrazioni/logo/".length);
@@ -4500,70 +4500,10 @@ async function listApprovedIntegrations(env) {
   return rows;
 }
 
-// GET /integrazioni — DEPRECATA (P29 FASE 2, passo A): resta attiva come
-// dynamic fallback SOLO finché la pagina statica gemella su authweb non è
-// confermata live — vedi gotcha §9 di P29-DESIGN: mai un 301 verso una
-// pagina non ancora pubblicata. Un commit successivo (passo B) la rimuove
-// e trasforma la route in 301.
-async function handleIntegrationsPage(env) {
-  const rows = await listApprovedIntegrations(env);
-  const cards = rows.map(r => `
-    <div class="intcard">
-      ${r.logo_key ? `<img class="intlogo" src="/integrazioni/logo/${escHtml(r.id)}" alt="" loading="lazy">` : `<div class="intlogo intlogo-ph" aria-hidden="true"></div>`}
-      <h2>${escHtml(r.app_name)}</h2>
-      <p>${escHtml(r.description)}</p>
-      <a href="${escHtml(r.url)}" target="_blank" rel="noopener nofollow">${escHtml(r.url)}</a>
-    </div>`).join("");
-
-  const html = `<!doctype html>
-<html lang="it">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Integrazioni e applicazioni — Spazio Genesi</title>
-<meta name="description" content="Applicazioni di terzi che integrano l'attestazione Spazio Genesi.">
-<style>
-  :root { --oro:#8B6914; --bg:#faf8f4; --card:#fff; --ink:#1f1d18; --muted:#6b6453; --line:#e7e1d4; }
-  * { box-sizing:border-box; }
-  body { margin:0; background:var(--bg); color:var(--ink);
-    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
-    line-height:1.55; padding:1.5rem; }
-  .wrap { max-width:1000px; margin:0 auto; }
-  h1 { font-size:1.6rem; margin:.2rem 0 .5rem; }
-  .lead { font-size:1rem; }
-  .muted { color:var(--muted); font-size:.9rem; }
-  a { color:var(--oro); }
-  .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(260px, 1fr)); gap:1rem; margin-top:1.5rem; }
-  .intcard { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:1.2rem;
-    box-shadow:0 1px 3px rgba(0,0,0,.04); }
-  .intcard h2 { font-size:1rem; margin:.6rem 0 .4rem; }
-  .intcard p { font-size:.88rem; color:var(--ink); margin:.2rem 0 .6rem; }
-  .intcard a { font-size:.82rem; word-break:break-all; }
-  .intlogo { width:88px; height:88px; object-fit:contain; border-radius:10px; background:#fff; border:1px solid var(--line); padding:.4rem; }
-  .intlogo-ph { background:#f2f0ea; }
-</style>
-</head>
-<body>
-<div class="wrap">
-  <h1>Integrazioni e applicazioni</h1>
-  <p class="lead">${rows.length} applicazion${rows.length === 1 ? "e" : "i"} di terzi integra${rows.length === 1 ? "" : "no"} l'attestazione Spazio Genesi.
-     La presenza qui non è una certificazione del software: verifica sempre autonomamente prima di usarlo.</p>
-  <p class="muted">Hai costruito un'integrazione? <a href="/profilo">Candidala dal tuo profilo</a>.</p>
-  <div class="grid">${cards || '<p class="muted">Nessuna integrazione pubblicata ancora.</p>'}</div>
-</div>
-</body>
-</html>`;
-
-  return new Response(html, {
-    status: 200,
-    headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "public, max-age=60", ...corsHeaders() },
-  });
-}
-
 // GET /api/integrations — copia JSON pubblica della vetrina (P29 FASE 2).
-// Sorgente machine-readable per la CI di authweb, che rigenera la pagina
-// statica /integrazioni/ a evento (repository_dispatch) invece che leggere
-// qui a ogni visita. Stessa cache/RL della pagina HTML sopra.
+// GET /integrazioni non renderizza più nulla: 301 verso la statica su
+// authweb, rigenerata dalla CI a evento (repository_dispatch) leggendo
+// proprio questo endpoint invece che a ogni visita. Cache 60s, RL_API.
 async function handleIntegrationsApi(env) {
   const rows = await listApprovedIntegrations(env);
   const items = rows.map(r => ({
