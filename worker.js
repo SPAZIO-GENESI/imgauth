@@ -1748,36 +1748,15 @@ function adminPageHtml() {
 </html>`;
 }
 
-// ── Documentazione API (OpenAPI + Swagger UI auto-ospitata) ──────────────────
-// GET /openapi.json serve lo spec OpenAPI 3.0 (openapi.json nel repo, sorgente
-// di verità del contratto machine-readable). GET /docs serve la Swagger UI
-// UFFICIALE (swagger-ui-dist, Apache-2.0) — nessun CDN di terze parti, stesso
-// principio già seguito per pdf.js. Gli asset (bundle.js, preset.js, css)
-// sono Static Assets (public/docs/, vedi [assets] in wrangler.toml), NON
-// import in worker.js: un tentativo di importarli come modulo "Text" dava
-// contenuto troncato/tipizzato male in wrangler dev per file oltre ~250KB
-// (limite/bug del loader). Gli asset statici hanno priorità automatica sul
-// Worker per i path che combaciano; /docs stesso resta dinamico (nessun
-// index.html in public/docs/, quindi cade qui sotto). Lo spec puntato è
-// sempre /openapi.json, stesso dominio — nessuna chiamata a host esterni.
-function swaggerUiHtml() {
-  return `<!doctype html>
-<html lang="it">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>API — imgauth</title>
-<meta name="robots" content="noindex">
-<link rel="stylesheet" href="/docs/swagger-ui.css">
-<style>body { margin:0; } .topbar { display:none; }</style>
-</head>
-<body>
-<div id="swagger-ui"></div>
-<script src="/docs/swagger-ui-bundle.js" charset="UTF-8"></script>
-<script src="/docs/swagger-ui-standalone-preset.js" charset="UTF-8"></script>
-<script src="/docs/swagger-init.js" charset="UTF-8"></script>
-</body>
-</html>`;
+// ── Documentazione API (OpenAPI + Swagger UI) ────────────────────────────────
+// GET /openapi.json resta qui (sorgente di verità del contratto machine-
+// readable, CORS aperto). GET /docs, dalla 1.25.0 (P29 FASE 1), non
+// renderizza più la Swagger UI: la pagina è statica su authweb
+// (attestazione.spaziogenesi.org/docs/, copia locale di openapi.json
+// sincronizzata da un workflow — zero chiamate passive al Worker); "Try it
+// out" chiama comunque imgauth perché lo spec dichiara "servers".
+function permanentRedirect(location) {
+  return new Response(null, { status: 301, headers: { Location: location } });
 }
 
 // ── Entry point ──────────────────────────────────────────────────────────────
@@ -1847,7 +1826,7 @@ export default {
       return handleDevOAuthCallback(url, provider, env, ctx);
     }
     if (method === "GET"  && path === "/openapi.json")          return withPublicCors(jsonResponse(openapiSpec));
-    if (method === "GET"  && path === "/docs")                  return htmlResponse(swaggerUiHtml());
+    if (method === "GET"  && path === "/docs")                  return permanentRedirect("https://attestazione.spaziogenesi.org/docs/");
     if (method === "GET"  && path === "/admin")                return htmlResponse(adminPageHtml());
     if (method === "GET"  && path === "/admin/api/keys")       return (await verifyAdminSecret(request, env)) ? handleAdminKeysList(env) : adminUnauthorized();
     if (method === "POST" && path === "/admin/api/keys")       return (await verifyAdminSecret(request, env)) ? handleAdminKeysIssue(request, env) : adminUnauthorized();
