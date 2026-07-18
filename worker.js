@@ -2953,8 +2953,8 @@ function profiloPageHtml(env) {
 
   <div class="card" id="identityBar" style="display:none;">
     <div class="row"><span class="k">Accesso come</span><span class="v" id="identityEmail"></span></div>
-    <div class="row" id="identityConventionRow" style="display:none;"><span class="k">Convenzione</span><span class="v" id="identityConvention"></span></div>
-    <div class="row" id="identityApiKeyRow" style="display:none;"><span class="k">Chiave API</span><span class="v" id="identityApiKey"></span></div>
+    <div class="row"><span class="k">Fascia</span><span class="v" id="identityFascia"></span></div>
+    <div class="row"><span class="k">Garanzia di recupero</span><span class="v" id="identityRetention"></span></div>
   </div>
 
   <div class="card" id="stateAnon">
@@ -3076,11 +3076,36 @@ async function handleProMe(request, env) {
   // sempre fresco da D1 (mai dal voucher), stesso principio di handleHash.
   const convention = await matchConvention(env, email);
   const apiKey = await env.DB.prepare(
-    `SELECT id, quota, used, period FROM agent_credentials WHERE owner_email = ? AND revoked = 0 LIMIT 1`
+    `SELECT id FROM agent_credentials WHERE owner_email = ? AND revoked = 0 LIMIT 1`
   ).bind(email).first().catch(() => null);
+
+  // Contratto effettivo (richiesta gestore 18/7): UNA riga chiara su quale
+  // fascia si applica a questa email e quale garanzia di recupero comporta —
+  // stessa precedenza e stessi numeri di /condizioni/ (Base 6 mesi,
+  // Sviluppatore 12 mesi, Professionale 5 anni, Convenzione 5 anni o quanto
+  // pattuito). Precedenza identica a quella di handleHash: convenzione →
+  // professionale → sviluppatore (chiave senza convenzione) → base.
+  const subActive = sub && (sub.status === "active" || sub.status === "past_due");
+  let contract;
+  if (convention) {
+    contract = {
+      fascia: "convenzione",
+      label: `Convenzione con ${convention.name}`,
+      retention: convention.persistence_years
+        ? `${convention.persistence_years} anni (secondo convenzione)`
+        : "5 anni (o secondo convenzione)",
+    };
+  } else if (subActive) {
+    contract = { fascia: "professionale", label: "Professionale", retention: "5 anni dalla produzione di ciascun certificato" };
+  } else if (apiKey) {
+    contract = { fascia: "sviluppatore", label: "Sviluppatore (chiave API)", retention: "12 mesi" };
+  } else {
+    contract = { fascia: "base", label: "Base", retention: "6 mesi" };
+  }
 
   return jsonResponse({
     email,
+    contract,
     subscription: sub ? {
       status: sub.status, period_end: sub.current_period_end, price_cents: sub.price_cents,
       created_at: sub.created_at, canceled_at: sub.canceled_at,
@@ -3090,8 +3115,6 @@ async function handleProMe(request, env) {
     usage: { month: ym, used: usedRow?.c || 0, quota },
     profile: sub && (sub.segment || sub.region) ? { segment: sub.segment, region: sub.region } : null,
     pricing: pricing ? { amount_cents: pricing.amount_cents, label: pricing.label, currency: pricing.currency } : null,
-    convention: convention ? { name: convention.name, ends_at: convention.ends_at } : null,
-    api_key: apiKey ? { id: apiKey.id, quota: apiKey.quota, used: apiKey.period === dayRome().slice(0, 7) ? apiKey.used : 0 } : null,
   });
 }
 

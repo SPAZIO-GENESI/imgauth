@@ -66,20 +66,8 @@
 
   function renderIdentity(data) {
     document.getElementById("identityEmail").textContent = data.email || "—";
-    var convRow = document.getElementById("identityConventionRow");
-    if (data.convention) {
-      document.getElementById("identityConvention").textContent = data.convention.name + " — valida fino al " + fmtDate(data.convention.ends_at);
-      convRow.style.display = "";
-    } else {
-      convRow.style.display = "none";
-    }
-    var keyRow = document.getElementById("identityApiKeyRow");
-    if (data.api_key) {
-      document.getElementById("identityApiKey").textContent = "attiva, " + data.api_key.used + " / " + data.api_key.quota + " questo mese";
-      keyRow.style.display = "";
-    } else {
-      keyRow.style.display = "none";
-    }
+    document.getElementById("identityFascia").textContent = (data.contract && data.contract.label) || "—";
+    document.getElementById("identityRetention").textContent = (data.contract && data.contract.retention) || "—";
     document.getElementById("identityBar").style.display = "";
   }
 
