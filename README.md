@@ -41,6 +41,23 @@ leggere l'email, poi il token viene scartato). Quota 50 attestazioni/mese,
 un'email = una chiave attiva (chiedere a `it@spaziogenesi.org` per revoca o
 quote più alte). Le convenzioni con quote più alte restano manuali via email.
 
+## Fascia Professionale (dalla 1.22.0)
+
+Abbonamento annuale a pagamento (Stripe) per chi attesta con continuità:
+200 attestazioni/mese, custodia del certificato garantita per almeno 5 anni.
+Stessa identità "senza account e senza password" delle chiavi self-service —
+la tua email verificata ti autentica, un voucher firmato stateless (mai un
+cookie) vive solo nel browser. Attivazione, stato, log delle ricariche,
+consumo del mese e archivio dei certificati (con il canale con cui ciascuno
+è stato prodotto: sito, API, MCP, bot Telegram) su
+[`/profilo`](https://imgauth.spaziogenesi.org/profilo). Gestione
+dell'abbonamento (fatture, metodo di pagamento, cessazione) interamente sul
+Customer Portal Stripe — nessun dato di pagamento tocca mai questo Worker.
+
+La catena di precedenza tra le fasce è **convenzione → professionale →
+sviluppatore/base**: mai un blocco, solo un degrado esplicito a quota
+esaurita o scaduta.
+
 ## Documentazione API
 
 Contratto completo in formato OpenAPI 3.0: [`/openapi.json`](https://imgauth.spaziogenesi.org/openapi.json)
