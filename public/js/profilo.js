@@ -73,6 +73,7 @@
 
   function renderMe(data) {
     renderIdentity(data);
+    document.getElementById("integrationCard").style.display = "none";
     if (!data.subscription) {
       var pricing = data.pricing;
       var priceText = pricing
@@ -87,6 +88,7 @@
           document.getElementById("devProfileConsent").checked = true;
         }
         showState("developer");
+        loadIntegration();
         return;
       }
       document.getElementById("onboardPrice").textContent = priceText;
@@ -123,7 +125,81 @@
 
     showState("active");
     loadCertificates(1);
+    loadIntegration();
   }
+
+  // ── P28: candidatura vetrina Integrazioni ─────────────────────────────
+  var INTEGRATION_STATUS_LABELS = {
+    pending: "In attesa di revisione da parte del gestore.",
+    approved: "Pubblicata nella vetrina Integrazioni.",
+    rejected: "Non approvata. Puoi modificarla e ricandidarla.",
+    removed: "Candidatura ritirata. Puoi ricandidarla in ogni momento.",
+  };
+
+  function renderIntegration(data) {
+    var card = document.getElementById("integrationCard");
+    if (!data.eligible) { card.style.display = "none"; return; }
+    card.style.display = "";
+    var banner = document.getElementById("integrationStatusBanner");
+    var withdrawBtn = document.getElementById("intWithdrawBtn");
+    var logoSection = document.getElementById("intLogoSection");
+    var integ = data.integration;
+    document.getElementById("intAppName").value = integ ? (integ.app_name || "") : "";
+    document.getElementById("intUrl").value = integ ? (integ.url || "") : "";
+    document.getElementById("intDescription").value = integ ? (integ.description || "") : "";
+    if (integ) {
+      banner.textContent = INTEGRATION_STATUS_LABELS[integ.status] || integ.status;
+      banner.className = "banner " + (integ.status === "approved" ? "off" : "warn");
+      banner.style.display = "";
+      withdrawBtn.style.display = integ.status === "removed" ? "none" : "";
+      logoSection.style.display = integ.status === "removed" ? "none" : "";
+    } else {
+      banner.style.display = "none";
+      withdrawBtn.style.display = "none";
+      logoSection.style.display = "none";
+    }
+  }
+
+  function loadIntegration() {
+    api("/api/pro/integration").then(renderIntegration).catch(function () {});
+  }
+
+  document.getElementById("intSaveBtn").addEventListener("click", function () {
+    var msg = document.getElementById("intMsg");
+    var payload = {
+      app_name: document.getElementById("intAppName").value.trim(),
+      url: document.getElementById("intUrl").value.trim(),
+      description: document.getElementById("intDescription").value.trim(),
+    };
+    if (!payload.app_name || !payload.url || !payload.description) {
+      msg.textContent = "Compila nome, URL e descrizione."; msg.className = "msg err"; return;
+    }
+    msg.textContent = "Invio…"; msg.className = "msg";
+    api("/api/pro/integration", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) })
+      .then(function () { msg.textContent = "Candidatura inviata: in attesa di revisione."; msg.className = "msg ok"; loadIntegration(); })
+      .catch(function (e) { msg.textContent = e.message; msg.className = "msg err"; });
+  });
+
+  document.getElementById("intWithdrawBtn").addEventListener("click", function () {
+    if (!confirm("Ritirare la candidatura? Sparirà dalla vetrina se pubblicata.")) return;
+    var msg = document.getElementById("intMsg");
+    api("/api/pro/integration", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ withdraw: true }) })
+      .then(function () { msg.textContent = "Candidatura ritirata."; msg.className = "msg ok"; loadIntegration(); })
+      .catch(function (e) { msg.textContent = e.message; msg.className = "msg err"; });
+  });
+
+  document.getElementById("intLogoBtn").addEventListener("click", function () {
+    var msg = document.getElementById("intLogoMsg");
+    var input = document.getElementById("intLogoInput");
+    var file = input.files && input.files[0];
+    if (!file) { msg.textContent = "Scegli un file."; msg.className = "msg err"; return; }
+    var fd = new FormData();
+    fd.append("logo", file);
+    msg.textContent = "Caricamento…"; msg.className = "msg";
+    api("/api/pro/integration/logo", { method: "POST", body: fd })
+      .then(function () { msg.textContent = "Logo caricato: in attesa di revisione."; msg.className = "msg ok"; input.value = ""; loadIntegration(); })
+      .catch(function (e) { msg.textContent = e.message; msg.className = "msg err"; });
+  });
 
   function loadCertificates(page) {
     certsPage = page;
@@ -175,7 +251,7 @@
   document.getElementById("certsPrevBtn").addEventListener("click", function () { if (certsPage > 1) loadCertificates(certsPage - 1); });
   document.getElementById("certsNextBtn").addEventListener("click", function () { loadCertificates(certsPage + 1); });
 
-  function doLogout() { clearVoucher(); document.getElementById("identityBar").style.display = "none"; showState("anon"); }
+  function doLogout() { clearVoucher(); document.getElementById("identityBar").style.display = "none"; document.getElementById("integrationCard").style.display = "none"; showState("anon"); }
   document.getElementById("logoutBtnOnboard").addEventListener("click", doLogout);
   document.getElementById("logoutBtnDeveloper").addEventListener("click", doLogout);
   document.getElementById("logoutBtnActive").addEventListener("click", doLogout);

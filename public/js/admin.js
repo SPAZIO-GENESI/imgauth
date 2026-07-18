@@ -39,8 +39,8 @@
   }
 
   function showTab(name) {
-    var tabs = { keys: "tabKeys", conventions: "tabConventions", pro: "tabPro" };
-    var btns = { keys: "tabBtnKeys", conventions: "tabBtnConventions", pro: "tabBtnPro" };
+    var tabs = { keys: "tabKeys", conventions: "tabConventions", pro: "tabPro", integrations: "tabIntegrations" };
+    var btns = { keys: "tabBtnKeys", conventions: "tabBtnConventions", pro: "tabBtnPro", integrations: "tabBtnIntegrations" };
     Object.keys(tabs).forEach(function (t) {
       document.getElementById(tabs[t]).style.display = t === name ? "" : "none";
       document.getElementById(btns[t]).classList.toggle("active", t === name);
@@ -53,6 +53,7 @@
   document.getElementById("tabBtnKeys").addEventListener("click", function () { showTab("keys"); loadKeys(); });
   document.getElementById("tabBtnConventions").addEventListener("click", function () { showTab("conventions"); loadConventions(); });
   document.getElementById("tabBtnPro").addEventListener("click", function () { showTab("pro"); loadProPricing(); loadProDiscounts(); loadProSubscribers(); });
+  document.getElementById("tabBtnIntegrations").addEventListener("click", function () { showTab("integrations"); loadIntegrations(); loadPoolPricing(); });
 
   function fmtDate(iso) {
     if (!iso) return "—";
@@ -545,6 +546,144 @@
   bindSortable("subTable", subSort, applySubView);
   document.getElementById("subSearch").addEventListener("input", applySubView);
   document.getElementById("subRefreshBtn").addEventListener("click", function (e) { e.preventDefault(); loadProSubscribers(); });
+
+  // ── P28: Integrazioni (candidature vetrina + listino pool B2B) ──────────
+  var INT_STATUS_PILLS = {
+    pending:  '<span class="pill" style="background:#fdf3e0;color:#8a5a00;">in attesa</span>',
+    approved: '<span class="pill ok">pubblicata</span>',
+    rejected: '<span class="pill revoked">rifiutata</span>',
+    removed:  '<span class="pill revoked">rimossa</span>',
+  };
+
+  function intRowHtml(it) {
+    var conv = it.convention
+      ? escHtml(it.convention.name) + ' (' + it.convention.pool_used_month + ' / ' + it.convention.monthly_quota + ')'
+      : '—';
+    var actions = '<div class="actions">';
+    if (it.status !== "approved") actions += '<button class="secondary btn-sm int-approve-btn" data-id="' + it.id + '">Approva</button>';
+    if (it.status !== "rejected") actions += '<button class="danger btn-sm int-reject-btn" data-id="' + it.id + '">Rifiuta</button>';
+    if (it.status !== "removed") actions += '<button class="danger btn-sm int-remove-btn" data-id="' + it.id + '">Rimuovi</button>';
+    actions += '<button class="secondary btn-sm int-note-btn" data-id="' + it.id + '" data-note="' + escHtml(it.review_note || '') + '">Nota</button>';
+    actions += '</div>';
+    var logoCell = it.logo_key ? '<button class="secondary btn-sm int-logo-btn" data-id="' + it.id + '">Vedi</button>' : '—';
+    return '<tr>' +
+      '<td class="wrap-cell">' + escHtml(it.owner_email) + '</td>' +
+      '<td class="wrap-cell">' + escHtml(it.app_name) + '</td>' +
+      '<td class="wrap-cell"><a href="' + escHtml(it.url) + '" target="_blank" rel="noopener">' + escHtml(it.url) + '</a></td>' +
+      '<td class="wrap-cell">' + escHtml(it.description) + '</td>' +
+      '<td>' + logoCell + '</td>' +
+      '<td class="wrap-cell">' + conv + '</td>' +
+      '<td>' + (INT_STATUS_PILLS[it.status] || escHtml(it.status)) + '</td>' +
+      '<td>' + fmtDate(it.submitted_at) + '</td>' +
+      '<td>' + actions + '</td>' +
+      '</tr>';
+  }
+
+  function attachIntegrationHandlers() {
+    Array.prototype.forEach.call(document.querySelectorAll(".int-approve-btn"), function (btn) {
+      btn.addEventListener("click", function () {
+        api("/admin/api/integrations/" + btn.dataset.id, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status: "approved" }) })
+          .then(loadIntegrations).catch(function (e) { alert(e.message); });
+      });
+    });
+    Array.prototype.forEach.call(document.querySelectorAll(".int-reject-btn"), function (btn) {
+      btn.addEventListener("click", function () {
+        if (!confirm("Rifiutare questa candidatura?")) return;
+        api("/admin/api/integrations/" + btn.dataset.id, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status: "rejected" }) })
+          .then(loadIntegrations).catch(function (e) { alert(e.message); });
+      });
+    });
+    Array.prototype.forEach.call(document.querySelectorAll(".int-remove-btn"), function (btn) {
+      btn.addEventListener("click", function () {
+        if (!confirm("Rimuovere questa candidatura dalla vetrina?")) return;
+        api("/admin/api/integrations/" + btn.dataset.id, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status: "removed" }) })
+          .then(loadIntegrations).catch(function (e) { alert(e.message); });
+      });
+    });
+    Array.prototype.forEach.call(document.querySelectorAll(".int-note-btn"), function (btn) {
+      btn.addEventListener("click", function () {
+        var note = prompt("Nota interna (mai pubblica):", btn.dataset.note || "");
+        if (note === null) return;
+        api("/admin/api/integrations/" + btn.dataset.id, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ review_note: note }) })
+          .then(loadIntegrations).catch(function (e) { alert(e.message); });
+      });
+    });
+    Array.prototype.forEach.call(document.querySelectorAll(".int-logo-btn"), function (btn) {
+      btn.addEventListener("click", function () {
+        fetch("/admin/api/integrations/" + btn.dataset.id + "/logo", { headers: { "X-Admin-Secret": getSecret() } })
+          .then(function (res) { if (!res.ok) throw new Error("Logo non disponibile."); return res.blob(); })
+          .then(function (blob) { window.open(URL.createObjectURL(blob), "_blank"); })
+          .catch(function (e) { alert(e.message); });
+      });
+    });
+  }
+
+  function loadIntegrations() {
+    var listMsg = document.getElementById("intListMsg");
+    listMsg.textContent = "Carico…"; listMsg.className = "loading-inline";
+    api("/admin/api/integrations").then(function (data) {
+      var body = document.getElementById("intBody");
+      body.innerHTML = (data.integrations || []).map(intRowHtml).join("") || '<tr><td colspan="9">Nessuna candidatura.</td></tr>';
+      listMsg.textContent = "";
+      attachIntegrationHandlers();
+    }).catch(function (e) {
+      if (e.message !== "unauthorized") { listMsg.textContent = e.message; listMsg.className = "loading-inline err"; }
+    });
+  }
+  document.getElementById("intRefreshBtn").addEventListener("click", function (e) { e.preventDefault(); loadIntegrations(); });
+
+  function poolRowHtml(p) {
+    var now = Date.now();
+    var isOpen = p.valid_from <= now && (p.valid_to == null || p.valid_to > now);
+    var statusPill = isOpen
+      ? '<span class="pill ok">attiva</span>'
+      : (p.valid_to && p.valid_to <= now) ? '<span class="pill revoked">chiusa</span>' : '<span class="pill" style="background:#f2f0ea;color:var(--muted);">futura</span>';
+    var actions = isOpen ? '<button class="secondary btn-sm pool-close-btn" data-id="' + p.id + '">Chiudi</button>' : '';
+    return '<tr>' +
+      '<td class="wrap-cell">' + escHtml(p.label) + '</td>' +
+      '<td>' + p.monthly_pool + '</td>' +
+      '<td>' + fmtEur(p.amount_cents) + '</td>' +
+      '<td>' + fmtDateOnly(p.valid_from) + '</td>' +
+      '<td>' + (p.valid_to ? fmtDateOnly(p.valid_to) : '—') + '</td>' +
+      '<td>' + statusPill + '</td>' +
+      '<td>' + actions + '</td>' +
+      '</tr>';
+  }
+
+  function loadPoolPricing() {
+    api("/admin/api/pool-pricing").then(function (data) {
+      var body = document.getElementById("poolBody");
+      body.innerHTML = (data.pricing || []).map(poolRowHtml).join("") || '<tr><td colspan="7">Nessuna riga di listino.</td></tr>';
+      Array.prototype.forEach.call(document.querySelectorAll(".pool-close-btn"), function (btn) {
+        btn.addEventListener("click", function () {
+          if (!confirm("Chiudere questa riga di listino da adesso?")) return;
+          api("/admin/api/pool-pricing/" + btn.dataset.id, { method: "PATCH" }).then(loadPoolPricing).catch(function (e) { alert(e.message); });
+        });
+      });
+    }).catch(function () {});
+  }
+
+  document.getElementById("poolCreateBtn").addEventListener("click", function () {
+    var msg = document.getElementById("poolCreateMsg");
+    var payload = {
+      label: document.getElementById("poolLabel").value.trim(),
+      monthly_pool: parseInt(document.getElementById("poolMonthly").value, 10),
+      amount_cents: eurToCents(document.getElementById("poolAmount").value),
+      valid_from: dateToMs("poolStarts"),
+      valid_to: dateToMs("poolEnds"),
+    };
+    if (!payload.label || !payload.monthly_pool || !payload.amount_cents || !payload.valid_from) {
+      msg.textContent = "Compila etichetta, pool mensile, prezzo e data di inizio."; msg.className = "msg err"; return;
+    }
+    msg.textContent = "Creazione…"; msg.className = "msg";
+    api("/admin/api/pool-pricing", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) })
+      .then(function () {
+        msg.textContent = "Fatto."; msg.className = "msg ok";
+        document.getElementById("poolLabel").value = "";
+        loadPoolPricing();
+      })
+      .catch(function (e) { if (e.message !== "unauthorized") { msg.textContent = e.message; msg.className = "msg err"; } });
+  });
 
   if (getSecret()) {
     api("/admin/api/keys").then(function () { showApp(); }).catch(function () {});

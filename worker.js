@@ -120,6 +120,29 @@ const IT_REGIONS = [
 // internamente chi e quanti sono i profili tecnici attivi, senza obbligo.
 const DEV_OS_OPTIONS = ["Windows", "macOS", "Linux", "iOS", "Android", "Altro"];
 
+// ── Vetrina Integrazioni (P28) ───────────────────────────────────────────────
+const INTEGRATION_LOGO_MAX_BYTES = 200 * 1024;
+// Margine per l'overhead del multipart (boundary, header per-parte): il
+// Content-Length della richiesta è sempre un po' più grande del solo file.
+const INTEGRATION_LOGO_MAX_REQUEST_BYTES = 300 * 1024;
+
+// Riconosce PNG/JPEG/WebP dai magic bytes (MAI dal Content-Type dichiarato,
+// falsificabile; MAI SVG, vettore di XSS — vedi §8 gotcha n.5 del design).
+function detectImageType(bytes) {
+  if (bytes.length >= 4 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4E && bytes[3] === 0x47) {
+    return { ext: "png", mime: "image/png" };
+  }
+  if (bytes.length >= 3 && bytes[0] === 0xFF && bytes[1] === 0xD8 && bytes[2] === 0xFF) {
+    return { ext: "jpg", mime: "image/jpeg" };
+  }
+  if (bytes.length >= 12 &&
+      bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46 &&
+      bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50) {
+    return { ext: "webp", mime: "image/webp" };
+  }
+  return null;
+}
+
 // ── Fascia Professionale — abbonamento (P27) ────────────────────────────────
 // Parametri tarabili (vedi P27-DESIGN-professionale.md §4/§6). La quota vera
 // viene da env.PRO_MONTHLY_QUOTA ([vars] in wrangler.toml, da FASE 4); questi
@@ -1503,6 +1526,7 @@ function adminPageHtml() {
       <button class="tabbtn active" id="tabBtnKeys" role="tab" aria-selected="true">Chiavi API</button>
       <button class="tabbtn" id="tabBtnConventions" role="tab" aria-selected="false">Convenzioni</button>
       <button class="tabbtn" id="tabBtnPro" role="tab" aria-selected="false">Professionale</button>
+      <button class="tabbtn" id="tabBtnIntegrations" role="tab" aria-selected="false">Integrazioni</button>
     </div>
 
     <div id="tabKeys">
@@ -1673,6 +1697,49 @@ function adminPageHtml() {
       </div>
     </div>
     </div>
+
+    <div id="tabIntegrations" style="display:none;">
+    <div class="card">
+      <div class="section-head">
+        <h2>Candidature vetrina</h2>
+        <div class="toolbar">
+          <span class="loading-inline" id="intListMsg"></span>
+          <button class="secondary btn-sm" id="intRefreshBtn">Aggiorna</button>
+        </div>
+      </div>
+      <p class="muted" style="margin-top:-.4rem;">Pre-moderazione: niente va online senza approvazione esplicita. Ogni modifica dopo l'approvazione torna in attesa.</p>
+      <div class="table-scroll">
+      <table id="intTable">
+        <thead><tr>
+          <th>Titolare</th><th>App</th><th>URL</th><th>Descrizione</th><th>Logo</th><th>Convenzione</th><th>Stato</th><th>Inviata</th><th></th>
+        </tr></thead>
+        <tbody id="intBody"></tbody>
+      </table>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2 style="font-size:1rem;margin:0 0 .8rem;">Listino pool B2B (interno/negoziale)</h2>
+      <p class="muted" style="margin-top:-.4rem;">Uso interno: non esposto pubblicamente. La pagina /integrazioni resta "su preventivo".</p>
+      <div class="row">
+        <div><label for="poolLabel">Etichetta</label><input id="poolLabel" placeholder="Pool 500"></div>
+        <div style="flex:0 0 130px;"><label for="poolMonthly">Pool/mese</label><input id="poolMonthly" type="number" min="1" value="500"></div>
+        <div style="flex:0 0 130px;"><label for="poolAmount">Prezzo annuo (€)</label><input id="poolAmount" type="number" min="0" step="0.01"></div>
+      </div>
+      <div class="row" style="margin-top:.6rem;">
+        <div><label for="poolStarts">Inizio</label><input id="poolStarts" type="date"></div>
+        <div><label for="poolEnds">Fine (facoltativa)</label><input id="poolEnds" type="date"></div>
+        <div style="flex:0 0 auto;"><button id="poolCreateBtn">Crea</button></div>
+      </div>
+      <p class="msg" id="poolCreateMsg"></p>
+      <div class="table-scroll">
+      <table id="poolTable">
+        <thead><tr><th>Etichetta</th><th>Pool/mese</th><th>Prezzo annuo</th><th>Inizio</th><th>Fine</th><th>Stato</th><th></th></tr></thead>
+        <tbody id="poolBody"></tbody>
+      </table>
+      </div>
+    </div>
+    </div>
   </div>
 </div>
 
@@ -1742,11 +1809,11 @@ export default {
       if (await isRateLimited(env.RL_API, ip)) return tooManyResponse();
     } else if (path.startsWith("/admin/api/")) {
       if (await isRateLimited(env.RL_API, ip)) return tooManyResponse();
-    } else if (method === "POST" && (path === "/api/pro/checkout" || path === "/api/pro/portal" || path === "/api/pro/profile" || path === "/api/pro/dev-profile")) {
+    } else if (method === "POST" && (path === "/api/pro/checkout" || path === "/api/pro/portal" || path === "/api/pro/profile" || path === "/api/pro/dev-profile" || path === "/api/pro/integration" || path === "/api/pro/integration/logo")) {
       if (await isRateLimited(env.RL_API, ip)) return tooManyResponse();
       // /api/pro/stripe-webhook resta DELIBERATAMENTE fuori: Stripe fa retry e
       // burst legittimi, la barriera è la verifica di firma (fail-closed sotto).
-    } else if (method === "GET" && (path === "/profilo" || path === "/api/pro/me" || path === "/api/pro/certificates")) {
+    } else if (method === "GET" && (path === "/profilo" || path === "/api/pro/me" || path === "/api/pro/certificates" || path === "/api/pro/integration")) {
       if (await isRateLimited(env.RL_API, ip)) return tooManyResponse();
     }
 
@@ -1802,6 +1869,25 @@ export default {
     if (method === "GET"  && path === "/api/pro/certificates")   return handleProCertificates(request, url, env);
     if (method === "POST" && path === "/api/pro/profile")        return handleProProfile(request, env);
     if (method === "POST" && path === "/api/pro/dev-profile")    return handleProDevProfile(request, env);
+    if (method === "GET"  && path === "/api/pro/integration")      return handleProIntegrationGet(request, env);
+    if (method === "POST" && path === "/api/pro/integration")      return handleProIntegration(request, env, ctx);
+    if (method === "POST" && path === "/api/pro/integration/logo") return handleProIntegrationLogo(request, env);
+
+    if (method === "GET"  && path === "/admin/api/integrations") return (await verifyAdminSecret(request, env)) ? handleAdminIntegrationsList(env) : adminUnauthorized();
+    if (method === "GET"  && path.startsWith("/admin/api/integrations/") && path.endsWith("/logo")) {
+      const id = path.slice("/admin/api/integrations/".length, -"/logo".length);
+      return (await verifyAdminSecret(request, env)) ? handleAdminIntegrationLogo(env, id) : adminUnauthorized();
+    }
+    if (method === "PATCH" && path.startsWith("/admin/api/integrations/")) {
+      const id = path.slice("/admin/api/integrations/".length);
+      return (await verifyAdminSecret(request, env)) ? handleAdminIntegrationsUpdate(request, env, id) : adminUnauthorized();
+    }
+    if (method === "GET"  && path === "/admin/api/pool-pricing") return (await verifyAdminSecret(request, env)) ? handleAdminPoolPricingList(env) : adminUnauthorized();
+    if (method === "POST" && path === "/admin/api/pool-pricing") return (await verifyAdminSecret(request, env)) ? handleAdminPoolPricingCreate(request, env) : adminUnauthorized();
+    if (method === "PATCH" && path.startsWith("/admin/api/pool-pricing/")) {
+      const id = path.slice("/admin/api/pool-pricing/".length);
+      return (await verifyAdminSecret(request, env)) ? handleAdminPoolPricingClose(env, id) : adminUnauthorized();
+    }
 
     if (method === "GET"  && path === "/admin/api/pro/pricing")  return (await verifyAdminSecret(request, env)) ? handleAdminProPricingList(env) : adminUnauthorized();
     if (method === "POST" && path === "/admin/api/pro/pricing")  return (await verifyAdminSecret(request, env)) ? handleAdminProPricingCreate(request, env) : adminUnauthorized();
@@ -3086,6 +3172,32 @@ function profiloPageHtml(env) {
     </div>
   </div>
 
+  <div class="card" id="integrationCard" style="display:none;">
+    <h2>La tua integrazione</h2>
+    <p class="muted">Hai costruito un'app o un servizio che usa l'attestazione? Candidala per la vetrina pubblica
+      <a href="/integrazioni">Integrazioni</a>. La pubblicazione richiede una verifica del gestore: nome,
+      URL, descrizione ed eventuale logo diventano pubblici — la tua email resta sempre privata.</p>
+    <div id="integrationStatusBanner" class="banner off" style="display:none;"></div>
+    <div class="formrow">
+      <div><label for="intAppName">Nome applicazione</label><input id="intAppName" maxlength="100" placeholder="es. Il mio bot Telegram"></div>
+      <div><label for="intUrl">URL (https://)</label><input id="intUrl" type="url" placeholder="https://…"></div>
+    </div>
+    <div class="formrow">
+      <div style="flex:1 1 100%;"><label for="intDescription">Descrizione (max 300 caratteri)</label><input id="intDescription" maxlength="300" placeholder="Cosa fa la tua app, in breve"></div>
+    </div>
+    <div class="actions">
+      <button class="btn primary" id="intSaveBtn" type="button">Candida / aggiorna</button>
+      <button class="btn danger" id="intWithdrawBtn" type="button" style="display:none;">Ritira candidatura</button>
+    </div>
+    <p class="msg" id="intMsg"></p>
+    <div id="intLogoSection" style="display:none;margin-top:1rem;border-top:1px solid var(--line);padding-top:1rem;">
+      <label for="intLogoInput">Logo (facoltativo — PNG, JPEG o WebP, max 200KB)</label>
+      <input id="intLogoInput" type="file" accept="image/png,image/jpeg,image/webp">
+      <div class="actions"><button class="btn" id="intLogoBtn" type="button">Carica logo</button></div>
+      <p class="msg" id="intLogoMsg"></p>
+    </div>
+  </div>
+
   <div class="card" id="stateCanceled" style="display:none;">
     <div class="banner off">Abbonamento cessato il <span id="canceledDate"></span>. L'archivio resta consultabile e recuperabile (garanzia 5 anni dalla produzione di ciascun certificato); le nuove attestazioni con questa email tornano alla fascia Base.</div>
     <div class="actions">
@@ -3283,6 +3395,279 @@ async function handleProDevProfile(request, env) {
   return jsonResponse({ ok: true });
 }
 
+// ── Vetrina Integrazioni /api/pro/integration* (P28 FASE 2) ─────────────────
+// Aperta a chi ha già una chiave API attiva (fascia Sviluppatore) O un
+// abbonamento Professionale attivo/in tolleranza — stesso criterio di
+// eleggibilità di handleProMe (§7 design): la moderazione a mano del gestore
+// è il filtro di veridicità, non un minimo di consumi.
+async function integrationEligible(env, email) {
+  const key = await env.DB.prepare(
+    `SELECT id FROM agent_credentials WHERE owner_email = ? AND revoked = 0 LIMIT 1`
+  ).bind(email).first().catch(() => null);
+  if (key) return true;
+  const sub = await env.DB.prepare(
+    `SELECT id FROM pro_subscriptions WHERE email = ? AND status IN ('active','past_due') LIMIT 1`
+  ).bind(email).first().catch(() => null);
+  return !!sub;
+}
+
+// GET /api/pro/integration — la candidatura dell'email corrente, o null.
+async function handleProIntegrationGet(request, env) {
+  if (!env?.DB) return jsonResponse({ error: "Servizio non disponibile." }, 503);
+  const token = request.headers.get("X-SG-Voucher") || "";
+  const payload = token ? await verifyVoucher(env, token) : null;
+  if (!payload) return jsonResponse({ error: "voucher_scaduto" }, 403);
+  const email = payload.email;
+
+  const row = await env.DB.prepare(
+    `SELECT id, app_name, url, description, status, logo_key FROM integrations WHERE owner_email = ?`
+  ).bind(email).first().catch(() => null);
+  return jsonResponse({
+    eligible: await integrationEligible(env, email),
+    integration: row ? { id: row.id, app_name: row.app_name, url: row.url, description: row.description, status: row.status, has_logo: !!row.logo_key } : null,
+  });
+}
+
+// POST /api/pro/integration — crea/aggiorna (SEMPRE torna 'pending', anche in
+// modifica di una candidatura approvata — è pubblica, ogni cambio va rivisto)
+// o ritira ({withdraw:true} → 'removed'). Una candidatura per email (UNIQUE).
+async function handleProIntegration(request, env, ctx) {
+  if (!env?.DB) return jsonResponse({ error: "Servizio non disponibile." }, 503);
+  const token = request.headers.get("X-SG-Voucher") || "";
+  const payload = token ? await verifyVoucher(env, token) : null;
+  if (!payload) return jsonResponse({ error: "voucher_scaduto" }, 403);
+  const email = payload.email;
+
+  let body;
+  try { body = await request.json(); } catch { return jsonResponse({ error: "Corpo non valido." }, 400); }
+
+  if (body?.withdraw === true) {
+    try {
+      const result = await env.DB.prepare(
+        `UPDATE integrations SET status = 'removed', reviewed_at = ? WHERE owner_email = ?`
+      ).bind(Date.now(), email).run();
+      if (!result.meta || result.meta.changes === 0) return jsonResponse({ error: "Nessuna candidatura trovata." }, 404);
+    } catch {
+      return jsonResponse({ error: "Errore interno." }, 500);
+    }
+    return jsonResponse({ ok: true, status: "removed" });
+  }
+
+  if (!(await integrationEligible(env, email))) {
+    return jsonResponse({ error: "La candidatura richiede una chiave API attiva o un abbonamento Professionale." }, 403);
+  }
+
+  const appName = cleanMeta(body?.app_name, 100);
+  const rawUrl = String(body?.url ?? "").trim().slice(0, 500);
+  const description = cleanMeta(body?.description, 300);
+  if (!appName) return jsonResponse({ error: "Nome applicazione mancante." }, 400);
+  if (!/^https:\/\/\S+$/i.test(rawUrl)) return jsonResponse({ error: "URL non valido: deve iniziare con https://." }, 400);
+  if (!description) return jsonResponse({ error: "Descrizione mancante." }, 400);
+
+  const now = Date.now();
+  const existing = await env.DB.prepare(`SELECT id FROM integrations WHERE owner_email = ?`).bind(email).first().catch(() => null);
+  try {
+    if (existing) {
+      await env.DB.prepare(
+        `UPDATE integrations SET app_name = ?, url = ?, description = ?, status = 'pending', submitted_at = ?, reviewed_at = NULL WHERE id = ?`
+      ).bind(appName, rawUrl, description, now, existing.id).run();
+    } else {
+      const id = `int_${randomHex(4)}`;
+      await env.DB.prepare(
+        `INSERT INTO integrations (id, owner_email, app_name, url, description, status, submitted_at) VALUES (?, ?, ?, ?, ?, 'pending', ?)`
+      ).bind(id, email, appName, rawUrl, description, now).run();
+    }
+  } catch {
+    return jsonResponse({ error: "Errore interno." }, 500);
+  }
+  if (ctx && typeof ctx.waitUntil === "function") {
+    ctx.waitUntil(sendTelegram(env, `🧩 Nuova candidatura vetrina Integrazioni: "${appName}" (${email}) — in attesa di revisione su /admin.`).catch(() => {}));
+  }
+  return jsonResponse({ ok: true, status: "pending" }, existing ? 200 : 201);
+}
+
+// POST /api/pro/integration/logo — multipart/form-data, campo "logo". Solo
+// PNG/JPEG/WebP validati sui magic bytes (mai il Content-Type dichiarato,
+// mai SVG). Riporta la candidatura a 'pending' (nuova revisione).
+async function handleProIntegrationLogo(request, env) {
+  if (!env?.DB || !env?.PDF_ARCHIVE) return jsonResponse({ error: "Servizio non disponibile." }, 503);
+  const token = request.headers.get("X-SG-Voucher") || "";
+  const payload = token ? await verifyVoucher(env, token) : null;
+  if (!payload) return jsonResponse({ error: "voucher_scaduto" }, 403);
+  const email = payload.email;
+
+  // Tetto PRIMA di bufferizzare tutto il body (Content-Length dichiarato dal
+  // client: difesa best-effort, il controllo definitivo è sui byte letti sotto).
+  const declaredLen = Number(request.headers.get("content-length") || 0);
+  if (declaredLen && declaredLen > INTEGRATION_LOGO_MAX_REQUEST_BYTES) {
+    return jsonResponse({ error: "File troppo grande (max 200KB)." }, 413);
+  }
+
+  const row = await env.DB.prepare(`SELECT id FROM integrations WHERE owner_email = ?`).bind(email).first().catch(() => null);
+  if (!row) return jsonResponse({ error: "Candidati prima di caricare un logo." }, 404);
+
+  let form;
+  try { form = await request.formData(); } catch { return jsonResponse({ error: "Corpo non valido." }, 400); }
+  const file = form.get("logo");
+  if (!file || typeof file.arrayBuffer !== "function") return jsonResponse({ error: "File mancante." }, 400);
+
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  if (bytes.length > INTEGRATION_LOGO_MAX_BYTES) return jsonResponse({ error: "File troppo grande (max 200KB)." }, 413);
+  const detected = detectImageType(bytes);
+  if (!detected) return jsonResponse({ error: "Formato non valido: solo PNG, JPEG o WebP (mai SVG)." }, 400);
+
+  const logoKey = `integrations/${row.id}.${detected.ext}`;
+  try {
+    await env.PDF_ARCHIVE.put(logoKey, bytes, { httpMetadata: { contentType: detected.mime } });
+    await env.DB.prepare(
+      `UPDATE integrations SET logo_key = ?, status = 'pending', reviewed_at = NULL WHERE id = ?`
+    ).bind(logoKey, row.id).run();
+  } catch {
+    return jsonResponse({ error: "Errore interno." }, 500);
+  }
+  return jsonResponse({ ok: true, status: "pending" });
+}
+
+// ── Pannello admin: scheda "Integrazioni" (P28) ──────────────────────────────
+// Stessa protezione di /admin/api/keys|conventions|pro/* (verifyAdminSecret
+// già applicata dal router prima di chiamare questi handler).
+
+// §5 design: accanto a ogni candidatura, la convenzione collegata (se
+// esiste, modello B o dominio email di modello A) e il consumo del mese —
+// così il gestore distingue partner B da integratore A senza query manuale.
+async function integrationConventionInfo(env, email) {
+  const key = await env.DB.prepare(
+    `SELECT convention_id FROM agent_credentials WHERE owner_email = ? AND revoked = 0 AND convention_id IS NOT NULL LIMIT 1`
+  ).bind(email).first().catch(() => null);
+  const convention = key?.convention_id
+    ? await env.DB.prepare(`SELECT id, name, monthly_quota FROM conventions WHERE id = ?`).bind(key.convention_id).first().catch(() => null)
+    : await matchConvention(env, email);
+  if (!convention) return null;
+  const ym = dayRome().slice(0, 7);
+  const poolRow = await env.DB.prepare(
+    `SELECT COUNT(*) AS c FROM convention_attestations WHERE convention_id = ? AND ym = ?`
+  ).bind(convention.id, ym).first().catch(() => ({ c: 0 }));
+  return { id: convention.id, name: convention.name, pool_used_month: poolRow?.c || 0, monthly_quota: convention.monthly_quota };
+}
+
+async function handleAdminIntegrationsList(env) {
+  if (!env?.DB) return jsonResponse({ error: "Servizio non disponibile." }, 503);
+  try {
+    const { results } = await env.DB.prepare(
+      `SELECT id, owner_email, app_name, url, description, logo_key, status, submitted_at, reviewed_at, review_note
+       FROM integrations ORDER BY submitted_at DESC`
+    ).all();
+    const rows = results || [];
+    const integrations = [];
+    for (const r of rows) {
+      const convention = r.owner_email === "(rimosso)" ? null : await integrationConventionInfo(env, r.owner_email);
+      integrations.push({ ...r, convention });
+    }
+    return jsonResponse({ integrations });
+  } catch {
+    return jsonResponse({ error: "Errore interno." }, 500);
+  }
+}
+
+// Anteprima logo per il gestore (anche di candidature non ancora approvate:
+// serve proprio per decidere se approvarle) — protetta da X-Admin-Secret,
+// a differenza dell'endpoint pubblico /integrazioni/logo/<id> che serve
+// SOLO le approvate (gotcha §8.6 del design).
+async function handleAdminIntegrationLogo(env, id) {
+  if (!env?.DB || !env?.PDF_ARCHIVE) return new Response("Servizio non disponibile.", { status: 503 });
+  const row = await env.DB.prepare(`SELECT logo_key FROM integrations WHERE id = ?`).bind(id).first().catch(() => null);
+  if (!row || !row.logo_key) return new Response("Non trovato.", { status: 404 });
+  const obj = await env.PDF_ARCHIVE.get(row.logo_key);
+  if (!obj) return new Response("Non trovato.", { status: 404 });
+  return new Response(obj.body, {
+    headers: { "Content-Type": obj.httpMetadata?.contentType || "application/octet-stream", "Cache-Control": "private, max-age=60" },
+  });
+}
+
+async function handleAdminIntegrationsUpdate(request, env, id) {
+  if (!env?.DB) return jsonResponse({ error: "Servizio non disponibile." }, 503);
+  let body;
+  try { body = await request.json(); } catch { return jsonResponse({ error: "Corpo non valido." }, 400); }
+
+  const sets = [], binds = [];
+  if (body?.status !== undefined) {
+    if (!["approved", "rejected", "removed", "pending"].includes(body.status)) {
+      return jsonResponse({ error: "Stato non valido." }, 400);
+    }
+    sets.push("status = ?"); binds.push(body.status);
+    sets.push("reviewed_at = ?"); binds.push(Date.now());
+  }
+  if (body?.review_note !== undefined) {
+    sets.push("review_note = ?"); binds.push(body.review_note ? String(body.review_note).trim().slice(0, 500) : null);
+  }
+  if (!sets.length) return jsonResponse({ error: "Nessuna modifica specificata." }, 400);
+  binds.push(id);
+
+  try {
+    const result = await env.DB.prepare(`UPDATE integrations SET ${sets.join(", ")} WHERE id = ?`).bind(...binds).run();
+    if (!result.meta || result.meta.changes === 0) return jsonResponse({ error: "Candidatura non trovata." }, 404);
+  } catch {
+    return jsonResponse({ error: "Errore interno." }, 500);
+  }
+  return jsonResponse({ ok: true });
+}
+
+// Listino pool B2B (modello B, uso interno/negoziale — mai esposto pubblicamente
+// in v1). Stesso pattern temporale di pro_pricing/handleAdminProPricing*.
+async function handleAdminPoolPricingList(env) {
+  if (!env?.DB) return jsonResponse({ error: "Servizio non disponibile." }, 503);
+  try {
+    const { results } = await env.DB.prepare(
+      `SELECT id, label, monthly_pool, amount_cents, valid_from, valid_to, created_at FROM pool_pricing ORDER BY valid_from DESC`
+    ).all();
+    return jsonResponse({ pricing: results || [] });
+  } catch {
+    return jsonResponse({ error: "Errore interno." }, 500);
+  }
+}
+
+async function handleAdminPoolPricingCreate(request, env) {
+  if (!env?.DB) return jsonResponse({ error: "Servizio non disponibile." }, 503);
+  let body;
+  try { body = await request.json(); } catch { return jsonResponse({ error: "Corpo non valido." }, 400); }
+
+  const label = String(body?.label ?? "").trim().slice(0, 200);
+  const monthlyPool = Number(body?.monthly_pool);
+  const amountCents = Number(body?.amount_cents);
+  const validFrom = Number(body?.valid_from);
+  const validTo = body?.valid_to === undefined || body?.valid_to === null || body?.valid_to === "" ? null : Number(body.valid_to);
+
+  if (!label) return jsonResponse({ error: "Etichetta mancante." }, 400);
+  if (!Number.isInteger(monthlyPool) || monthlyPool <= 0) return jsonResponse({ error: "Pool mensile non valido." }, 400);
+  if (!Number.isInteger(amountCents) || amountCents <= 0) return jsonResponse({ error: "Importo non valido." }, 400);
+  if (!Number.isInteger(validFrom)) return jsonResponse({ error: "Data inizio non valida." }, 400);
+  if (validTo != null && (!Number.isInteger(validTo) || validTo <= validFrom)) return jsonResponse({ error: "Data fine non valida." }, 400);
+
+  const id = `pool-${randomHex(4)}`;
+  try {
+    await env.DB.prepare(
+      `INSERT INTO pool_pricing (id, label, monthly_pool, amount_cents, valid_from, valid_to, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`
+    ).bind(id, label, monthlyPool, amountCents, validFrom, validTo, Date.now()).run();
+  } catch {
+    return jsonResponse({ error: "Errore interno." }, 500);
+  }
+  return jsonResponse({ id }, 201);
+}
+
+async function handleAdminPoolPricingClose(env, id) {
+  if (!env?.DB) return jsonResponse({ error: "Servizio non disponibile." }, 503);
+  try {
+    const now = Date.now();
+    const result = await env.DB.prepare(
+      `UPDATE pool_pricing SET valid_to = ? WHERE id = ? AND (valid_to IS NULL OR valid_to > ?)`
+    ).bind(now, id, now).run();
+    if (!result.meta || result.meta.changes === 0) return jsonResponse({ error: "Riga non trovata o già chiusa." }, 404);
+  } catch {
+    return jsonResponse({ error: "Errore interno." }, 500);
+  }
+  return jsonResponse({ ok: true });
+}
+
 // ── Pannello admin: scheda "Professionale" (P27 §9) ──────────────────────────
 // Stessa protezione di /admin/api/keys|conventions (verifyAdminSecret già
 // applicata dal router prima di chiamare questi handler).
@@ -3465,6 +3850,10 @@ async function handleAdminProSubscribersForget(request, env, id) {
       env.DB.prepare(`UPDATE pro_subscriptions SET email = '(rimosso)' WHERE email = ?`).bind(email),
       env.DB.prepare(`UPDATE pro_attestations SET email = '(rimosso)' WHERE email = ?`).bind(email),
       env.DB.prepare(`UPDATE agent_credentials SET owner_email = '(rimosso)', owner_provider = NULL WHERE owner_email = ? AND revoked = 1`).bind(email),
+      // P28: la vetrina è pubblica (nome, URL, logo) ma legata a un'email
+      // privata — il forget la ritira e ne anonimizza il titolare, stesso
+      // principio del withdraw volontario dal profilo.
+      env.DB.prepare(`UPDATE integrations SET owner_email = '(rimosso)', status = 'removed' WHERE owner_email = ?`).bind(email),
     ]);
   } catch {
     return jsonResponse({ error: "Errore interno." }, 500);
