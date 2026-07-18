@@ -1784,7 +1784,7 @@ export default {
       if (await isRateLimited(env.RL_API, ip)) return tooManyResponse();
     } else if (method === "GET" && (path === "/api/ots" || path === "/api/cert" || path === "/api/badge" || path === "/api/agent/token" || path === "/api/badge/integration")) {
       if (await isRateLimited(env.RL_API, ip)) return tooManyResponse();
-    } else if (method === "GET" && (path === "/integrazioni" || path.startsWith("/integrazioni/logo/"))) {
+    } else if (method === "GET" && (path === "/integrazioni" || path === "/api/integrations" || path.startsWith("/integrazioni/logo/"))) {
       if (await isRateLimited(env.RL_API, ip)) return tooManyResponse();
     } else if (method === "GET" && (path === "/developer/keys" || path === "/api/dev/oauth/start" || path.startsWith("/api/dev/oauth/callback/"))) {
       if (await isRateLimited(env.RL_API, ip)) return tooManyResponse();
@@ -1806,7 +1806,8 @@ export default {
     if (method === "GET"  && path === "/api/cert")     return handleCert(url, env);
     if (method === "GET"  && path === "/api/badge")    return handleBadge(url, env);
     if (method === "GET"  && path === "/api/badge/integration") return handleIntegrationBadge(url, env);
-    if (method === "GET"  && path === "/integrazioni") return handleIntegrationsPage(env);
+    if (method === "GET"  && path === "/integrazioni") return handleIntegrationsPage(env); // P29 passo A: 301 arriva nel passo B, vedi commento sopra la funzione
+    if (method === "GET"  && path === "/api/integrations") return withPublicCors(await handleIntegrationsApi(env));
     if (method === "GET"  && path.startsWith("/integrazioni/logo/")) {
       const id = path.slice("/integrazioni/logo/".length);
       return handleIntegrationsLogoPublic(env, id);
@@ -1858,7 +1859,7 @@ export default {
     if (method === "POST" && path === "/api/pro/dev-profile")    return handleProDevProfile(request, env);
     if (method === "GET"  && path === "/api/pro/integration")      return handleProIntegrationGet(request, env);
     if (method === "POST" && path === "/api/pro/integration")      return handleProIntegration(request, env, ctx);
-    if (method === "POST" && path === "/api/pro/integration/logo") return handleProIntegrationLogo(request, env);
+    if (method === "POST" && path === "/api/pro/integration/logo") return handleProIntegrationLogo(request, env, ctx);
 
     if (method === "GET"  && path === "/admin/api/integrations") return (await verifyAdminSecret(request, env)) ? handleAdminIntegrationsList(env) : adminUnauthorized();
     if (method === "GET"  && path.startsWith("/admin/api/integrations/") && path.endsWith("/logo")) {
@@ -1867,7 +1868,7 @@ export default {
     }
     if (method === "PATCH" && path.startsWith("/admin/api/integrations/")) {
       const id = path.slice("/admin/api/integrations/".length);
-      return (await verifyAdminSecret(request, env)) ? handleAdminIntegrationsUpdate(request, env, id) : adminUnauthorized();
+      return (await verifyAdminSecret(request, env)) ? handleAdminIntegrationsUpdate(request, env, id, ctx) : adminUnauthorized();
     }
     if (method === "GET"  && path === "/admin/api/pool-pricing") return (await verifyAdminSecret(request, env)) ? handleAdminPoolPricingList(env) : adminUnauthorized();
     if (method === "POST" && path === "/admin/api/pool-pricing") return (await verifyAdminSecret(request, env)) ? handleAdminPoolPricingCreate(request, env) : adminUnauthorized();
@@ -1891,7 +1892,7 @@ export default {
     if (method === "GET"  && path === "/admin/api/pro/subscribers") return (await verifyAdminSecret(request, env)) ? handleAdminProSubscribersList(env) : adminUnauthorized();
     if (method === "PATCH" && path.startsWith("/admin/api/pro/subscribers/")) {
       const id = path.slice("/admin/api/pro/subscribers/".length);
-      return (await verifyAdminSecret(request, env)) ? handleAdminProSubscribersForget(request, env, id) : adminUnauthorized();
+      return (await verifyAdminSecret(request, env)) ? handleAdminProSubscribersForget(request, env, id, ctx) : adminUnauthorized();
     }
 
     return jsonResponse({ error: "Endpoint non trovato", path }, 404);
@@ -3408,6 +3409,28 @@ async function integrationEligible(env, email) {
   return !!sub;
 }
 
+// P29 FASE 2: notifica authweb a ogni cambio di stato di un'integrazione
+// (approvazione/rifiuto/rimozione/ritiro), così la vetrina statica
+// /integrazioni/ si rigenera in pochi minuti invece di aspettare il cron
+// settimanale di sicurezza del workflow authweb. Fail-safe: secret assente
+// o dispatch fallito non blocca MAI l'operazione admin/utente che l'ha
+// innescato — va sempre chiamata dentro ctx.waitUntil.
+async function dispatchIntegrationsUpdated(env) {
+  if (!env?.GITHUB_DISPATCH_TOKEN) return;
+  try {
+    await fetch("https://api.github.com/repos/SPAZIO-GENESI/imgauthweb/dispatches", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${env.GITHUB_DISPATCH_TOKEN}`,
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "imgauth-worker",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ event_type: "integrations-updated" }),
+    });
+  } catch { /* best-effort, vedi commento sopra */ }
+}
+
 // GET /api/pro/integration — la candidatura dell'email corrente, o null.
 async function handleProIntegrationGet(request, env) {
   if (!env?.DB) return jsonResponse({ error: "Servizio non disponibile." }, 503);
@@ -3448,6 +3471,7 @@ async function handleProIntegration(request, env, ctx) {
       return jsonResponse({ error: "Errore interno." }, 500);
     }
     _integrationsCache = null;
+    if (ctx && typeof ctx.waitUntil === "function") ctx.waitUntil(dispatchIntegrationsUpdated(env));
     return jsonResponse({ ok: true, status: "removed" });
   }
 
@@ -3481,6 +3505,7 @@ async function handleProIntegration(request, env, ctx) {
   _integrationsCache = null;
   if (ctx && typeof ctx.waitUntil === "function") {
     ctx.waitUntil(sendTelegram(env, `🧩 Nuova candidatura vetrina Integrazioni: "${appName}" (${email}) — in attesa di revisione su /admin.`).catch(() => {}));
+    ctx.waitUntil(dispatchIntegrationsUpdated(env));
   }
   return jsonResponse({ ok: true, status: "pending" }, existing ? 200 : 201);
 }
@@ -3488,7 +3513,7 @@ async function handleProIntegration(request, env, ctx) {
 // POST /api/pro/integration/logo — multipart/form-data, campo "logo". Solo
 // PNG/JPEG/WebP validati sui magic bytes (mai il Content-Type dichiarato,
 // mai SVG). Riporta la candidatura a 'pending' (nuova revisione).
-async function handleProIntegrationLogo(request, env) {
+async function handleProIntegrationLogo(request, env, ctx) {
   if (!env?.DB || !env?.PDF_ARCHIVE) return jsonResponse({ error: "Servizio non disponibile." }, 503);
   const token = request.headers.get("X-SG-Voucher") || "";
   const payload = token ? await verifyVoucher(env, token) : null;
@@ -3525,6 +3550,7 @@ async function handleProIntegrationLogo(request, env) {
     return jsonResponse({ error: "Errore interno." }, 500);
   }
   _integrationsCache = null;
+  if (ctx && typeof ctx.waitUntil === "function") ctx.waitUntil(dispatchIntegrationsUpdated(env));
   return jsonResponse({ ok: true, status: "pending" });
 }
 
@@ -3584,7 +3610,7 @@ async function handleAdminIntegrationLogo(env, id) {
   });
 }
 
-async function handleAdminIntegrationsUpdate(request, env, id) {
+async function handleAdminIntegrationsUpdate(request, env, id, ctx) {
   if (!env?.DB) return jsonResponse({ error: "Servizio non disponibile." }, 503);
   let body;
   try { body = await request.json(); } catch { return jsonResponse({ error: "Corpo non valido." }, 400); }
@@ -3610,6 +3636,7 @@ async function handleAdminIntegrationsUpdate(request, env, id) {
     return jsonResponse({ error: "Errore interno." }, 500);
   }
   _integrationsCache = null;
+  if (ctx && typeof ctx.waitUntil === "function") ctx.waitUntil(dispatchIntegrationsUpdated(env));
   return jsonResponse({ ok: true });
 }
 
@@ -3823,7 +3850,7 @@ async function handleAdminProSubscribersList(env) {
 // (proprie di altri abbonati o di convenzione): il loro diritto di recupero
 // prevale. Il calcolo della condivisione avviene PRIMA di anonimizzare,
 // altrimenti le righe appena anonimizzate falserebbero il conteggio.
-async function handleAdminProSubscribersForget(request, env, id) {
+async function handleAdminProSubscribersForget(request, env, id, ctx) {
   if (!env?.DB) return jsonResponse({ error: "Servizio non disponibile." }, 503);
   let body;
   try { body = await request.json(); } catch { body = {}; }
@@ -3860,6 +3887,7 @@ async function handleAdminProSubscribersForget(request, env, id) {
     return jsonResponse({ error: "Errore interno." }, 500);
   }
   _integrationsCache = null;
+  if (ctx && typeof ctx.waitUntil === "function") ctx.waitUntil(dispatchIntegrationsUpdated(env));
 
   let pdfsDeleted = 0;
   if (deletableHashes.length && env?.PDF_ARCHIVE) {
@@ -4472,9 +4500,11 @@ async function listApprovedIntegrations(env) {
   return rows;
 }
 
-// GET /integrazioni — vetrina pubblica (stesso pattern server-rendered di
-// /profilo e /developer/keys, ma qui il contenuto è pubblico e va nel
-// documento stesso: niente route Cloudflare nuova, zero JS inline).
+// GET /integrazioni — DEPRECATA (P29 FASE 2, passo A): resta attiva come
+// dynamic fallback SOLO finché la pagina statica gemella su authweb non è
+// confermata live — vedi gotcha §9 di P29-DESIGN: mai un 301 verso una
+// pagina non ancora pubblicata. Un commit successivo (passo B) la rimuove
+// e trasforma la route in 301.
 async function handleIntegrationsPage(env) {
   const rows = await listApprovedIntegrations(env);
   const cards = rows.map(r => `
@@ -4527,6 +4557,25 @@ async function handleIntegrationsPage(env) {
   return new Response(html, {
     status: 200,
     headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "public, max-age=60", ...corsHeaders() },
+  });
+}
+
+// GET /api/integrations — copia JSON pubblica della vetrina (P29 FASE 2).
+// Sorgente machine-readable per la CI di authweb, che rigenera la pagina
+// statica /integrazioni/ a evento (repository_dispatch) invece che leggere
+// qui a ogni visita. Stessa cache/RL della pagina HTML sopra.
+async function handleIntegrationsApi(env) {
+  const rows = await listApprovedIntegrations(env);
+  const items = rows.map(r => ({
+    id: r.id,
+    app_name: r.app_name,
+    url: r.url,
+    description: r.description,
+    logo_url: r.logo_key ? `https://imgauth.spaziogenesi.org/integrazioni/logo/${r.id}` : null,
+  }));
+  return new Response(JSON.stringify({ count: items.length, items }, null, 2), {
+    status: 200,
+    headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "public, max-age=60" },
   });
 }
 

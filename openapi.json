@@ -2,7 +2,7 @@
   "openapi": "3.0.3",
   "info": {
     "title": "imgauth — API di attestazione opere digitali",
-    "version": "1.18.1",
+    "version": "1.26.0",
     "description": "Motore di attestazione Spazio Genesi ETS. Full privacy: l'impronta SHA-256 si calcola sul client, il file non viene mai inviato al server. Contratto reale in italiano (non tradurre i nomi campo). Vedi https://attestazione.spaziogenesi.org per l'interfaccia utente e https://github.com/SPAZIO-GENESI/imgauth per il codice sorgente (AGPL-3.0).",
     "contact": { "name": "Spazio Genesi ETS", "url": "https://spaziogenesi.org" },
     "license": { "name": "AGPL-3.0-only", "url": "https://github.com/SPAZIO-GENESI/imgauth/blob/main/LICENSE" }
@@ -168,6 +168,15 @@
       "get": { "summary": "Eventi fini di salute per un giorno", "description": "Errori, degradi, rallentamenti sotto soglia. CORS aperto.",
         "parameters": [ { "name": "day", "in": "query", "required": false, "schema": { "type": "string", "format": "date" }, "description": "default: oggi UTC" } ],
         "responses": { "200": { "description": "Eventi", "content": { "application/json": { "schema": { "type": "object" } } } } } }
+    },
+    "/api/integrations": {
+      "get": { "summary": "Elenco pubblico delle integrazioni approvate", "description": "Sole candidature con status 'approved'. Sorgente machine-readable per la vetrina statica su attestazione.spaziogenesi.org/integrazioni/ (P29). Cache 60s, CORS aperto.",
+        "responses": { "200": { "description": "Elenco", "content": { "application/json": { "schema": { "type": "object", "properties": {
+          "count": { "type": "integer" },
+          "items": { "type": "array", "items": { "type": "object", "properties": {
+            "id": { "type": "string" }, "app_name": { "type": "string" }, "url": { "type": "string" }, "description": { "type": "string" }, "logo_url": { "type": "string", "nullable": true }
+          } } }
+        } } } } }, "429": { "description": "Rate limit per-IP (60/60s)" } } }
     },
     "/c/{hash}": {
       "get": {
