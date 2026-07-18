@@ -34,7 +34,7 @@
     });
   }
 
-  var states = ["Anon", "Onboard", "Active", "Canceled"];
+  var states = ["Anon", "Onboard", "Developer", "Active", "Canceled"];
   function showState(name) {
     states.forEach(function (s) {
       document.getElementById("state" + s).style.display = s.toLowerCase() === name ? "" : "none";
@@ -75,9 +75,21 @@
     renderIdentity(data);
     if (!data.subscription) {
       var pricing = data.pricing;
-      document.getElementById("onboardPrice").textContent = pricing
+      var priceText = pricing
         ? "Abbonamento annuale: " + fmtEur(pricing.amount_cents) + "."
         : "Nessun listino attivo al momento: riprova più tardi.";
+      if (data.contract && data.contract.fascia === "sviluppatore") {
+        document.getElementById("devOnboardPrice").textContent = priceText;
+        if (data.dev_profile) {
+          document.getElementById("devAppName").value = data.dev_profile.app_name || "";
+          document.getElementById("devOs").value = data.dev_profile.os || "";
+          document.getElementById("devEnvironment").value = data.dev_profile.environment || "";
+          document.getElementById("devProfileConsent").checked = true;
+        }
+        showState("developer");
+        return;
+      }
+      document.getElementById("onboardPrice").textContent = priceText;
       showState("onboard");
       return;
     }
@@ -135,14 +147,16 @@
 
   if (getVoucher()) loadMe(); else showState("anon");
 
-  document.getElementById("checkoutBtn").addEventListener("click", function () {
-    var msg = document.getElementById("checkoutMsg");
+  function doCheckout(discountInputId, msgId) {
+    var msg = document.getElementById(msgId);
     msg.textContent = "Attendere…"; msg.className = "msg";
-    var code = document.getElementById("discountInput").value.trim();
+    var code = document.getElementById(discountInputId).value.trim();
     api("/api/pro/checkout", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(code ? { discount_code: code } : {}) })
       .then(function (data) { location.href = data.url; })
       .catch(function (e) { msg.textContent = e.message; msg.className = "msg err"; });
-  });
+  }
+  document.getElementById("checkoutBtn").addEventListener("click", function () { doCheckout("discountInput", "checkoutMsg"); });
+  document.getElementById("devCheckoutBtn").addEventListener("click", function () { doCheckout("devDiscountInput", "devCheckoutMsg"); });
 
   document.getElementById("portalBtn").addEventListener("click", function () {
     var msg = document.getElementById("portalMsg");
@@ -163,8 +177,39 @@
 
   function doLogout() { clearVoucher(); document.getElementById("identityBar").style.display = "none"; showState("anon"); }
   document.getElementById("logoutBtnOnboard").addEventListener("click", doLogout);
+  document.getElementById("logoutBtnDeveloper").addEventListener("click", doLogout);
   document.getElementById("logoutBtnActive").addEventListener("click", doLogout);
   document.getElementById("logoutBtnCanceled").addEventListener("click", doLogout);
+
+  document.getElementById("saveDevProfileBtn").addEventListener("click", function () {
+    var msg = document.getElementById("devProfileMsg");
+    var appName = document.getElementById("devAppName").value.trim();
+    var os = document.getElementById("devOs").value;
+    var environment = document.getElementById("devEnvironment").value.trim();
+    var consent = document.getElementById("devProfileConsent").checked;
+    if ((appName || os || environment) && !consent) { msg.textContent = "Serve il consenso per salvare questi dati."; msg.className = "msg err"; return; }
+    msg.textContent = "Salvataggio…"; msg.className = "msg";
+    api("/api/pro/dev-profile", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ app_name: appName || null, os: os || null, environment: environment || null, consent: consent }),
+    })
+      .then(function () { msg.textContent = "Salvato."; msg.className = "msg ok"; })
+      .catch(function (e) { msg.textContent = e.message; msg.className = "msg err"; });
+  });
+
+  document.getElementById("clearDevProfileBtn").addEventListener("click", function () {
+    if (!confirm("Rimuovere i dati del tuo progetto?")) return;
+    var msg = document.getElementById("devProfileMsg");
+    api("/api/pro/dev-profile", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ clear: true }) })
+      .then(function () {
+        document.getElementById("devAppName").value = "";
+        document.getElementById("devOs").value = "";
+        document.getElementById("devEnvironment").value = "";
+        document.getElementById("devProfileConsent").checked = false;
+        msg.textContent = "Rimosso."; msg.className = "msg ok";
+      })
+      .catch(function (e) { msg.textContent = e.message; msg.className = "msg err"; });
+  });
 
   document.getElementById("saveProfileBtn").addEventListener("click", function () {
     var msg = document.getElementById("profileMsg");

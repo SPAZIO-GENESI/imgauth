@@ -116,6 +116,10 @@ const IT_REGIONS = [
   "Sicilia", "Toscana", "Trentino-Alto Adige", "Umbria", "Valle d'Aosta", "Veneto", "Estero",
 ];
 
+// Profilazione facoltativa della fascia Sviluppatore (P27, 18/7): sapere
+// internamente chi e quanti sono i profili tecnici attivi, senza obbligo.
+const DEV_OS_OPTIONS = ["Windows", "macOS", "Linux", "iOS", "Android", "Altro"];
+
 // ── Fascia Professionale — abbonamento (P27) ────────────────────────────────
 // Parametri tarabili (vedi P27-DESIGN-professionale.md §4/§6). La quota vera
 // viene da env.PRO_MONTHLY_QUOTA ([vars] in wrangler.toml, da FASE 4); questi
@@ -1718,7 +1722,7 @@ export default {
       if (await isRateLimited(env.RL_API, ip)) return tooManyResponse();
     } else if (path.startsWith("/admin/api/")) {
       if (await isRateLimited(env.RL_API, ip)) return tooManyResponse();
-    } else if (method === "POST" && (path === "/api/pro/checkout" || path === "/api/pro/portal" || path === "/api/pro/profile")) {
+    } else if (method === "POST" && (path === "/api/pro/checkout" || path === "/api/pro/portal" || path === "/api/pro/profile" || path === "/api/pro/dev-profile")) {
       if (await isRateLimited(env.RL_API, ip)) return tooManyResponse();
       // /api/pro/stripe-webhook resta DELIBERATAMENTE fuori: Stripe fa retry e
       // burst legittimi, la barriera è la verifica di firma (fail-closed sotto).
@@ -1777,6 +1781,7 @@ export default {
     if (method === "GET"  && path === "/api/pro/me")             return handleProMe(request, env);
     if (method === "GET"  && path === "/api/pro/certificates")   return handleProCertificates(request, url, env);
     if (method === "POST" && path === "/api/pro/profile")        return handleProProfile(request, env);
+    if (method === "POST" && path === "/api/pro/dev-profile")    return handleProDevProfile(request, env);
 
     if (method === "GET"  && path === "/admin/api/pro/pricing")  return (await verifyAdminSecret(request, env)) ? handleAdminProPricingList(env) : adminUnauthorized();
     if (method === "POST" && path === "/admin/api/pro/pricing")  return (await verifyAdminSecret(request, env)) ? handleAdminProPricingCreate(request, env) : adminUnauthorized();
@@ -2892,6 +2897,7 @@ function profiloPageHtml(env) {
     .join("");
   const regionOptions = IT_REGIONS.map(r => `<option value="${escHtml(r)}">${escHtml(r)}</option>`).join("");
   const segmentOptions = PRO_SEGMENTS.map(s => `<option value="${s}">${escHtml(PRO_SEGMENT_LABELS[s])}</option>`).join("");
+  const devOsOptions = DEV_OS_OPTIONS.map(o => `<option value="${escHtml(o)}">${escHtml(o)}</option>`).join("");
 
   return `<!doctype html>
 <html lang="it">
@@ -2973,6 +2979,38 @@ function profiloPageHtml(env) {
     </div>
     <p class="msg" id="checkoutMsg"></p>
     <button class="btn" id="logoutBtnOnboard" type="button">Esci</button>
+  </div>
+
+  <div class="card" id="stateDeveloper" style="display:none;">
+    <h2>Fascia Sviluppatore</h2>
+    <p class="lead">Sei in fascia Sviluppatore: pensata per <strong>costruire e testare</strong> la tua integrazione, non per farla girare in produzione — per questo la quota resta bassa (50 attestazioni al mese). Se il tuo progetto è (o sta per andare) in produzione, la fascia giusta è Professionale.</p>
+    <div class="actions"><a class="btn" href="/developer/keys">Gestisci la tua chiave API</a></div>
+
+    <h2 style="margin-top:1.3rem;">Il tuo progetto (facoltativo)</h2>
+    <p class="muted">Facoltativo, visibile solo a te e a noi. Ci aiuta a capire chi sta costruendo cosa.</p>
+    <div class="formrow">
+      <div><label for="devAppName">Applicazione/progetto</label><input id="devAppName" placeholder="es. il mio bot Telegram"></div>
+      <div><label for="devOs">Sistema operativo</label><select id="devOs"><option value="">—</option>${devOsOptions}</select></div>
+    </div>
+    <div class="formrow">
+      <div><label for="devEnvironment">Ambiente di sviluppo</label><input id="devEnvironment" placeholder="es. Claude Code, VS Code, script Python, n8n…"></div>
+    </div>
+    <label class="consent"><input type="checkbox" id="devProfileConsent"> Acconsento all'uso di questi dati facoltativi come descritto sopra.</label>
+    <div class="actions">
+      <button class="btn" id="saveDevProfileBtn" type="button">Salva</button>
+      <button class="btn danger" id="clearDevProfileBtn" type="button">Rimuovi questi dati</button>
+    </div>
+    <p class="msg" id="devProfileMsg"></p>
+
+    <h2 style="margin-top:1.3rem;border-top:1px solid var(--line);padding-top:1.1rem;">Passa a Professionale</h2>
+    <p class="lead" id="devOnboardPrice"></p>
+    <div class="formrow">
+      <div><label for="devDiscountInput">Hai un codice?</label><input id="devDiscountInput" placeholder="Facoltativo"></div>
+      <div style="flex:0 0 auto;"><button class="btn primary" id="devCheckoutBtn" type="button">Continua su Stripe</button></div>
+    </div>
+    <p class="msg" id="devCheckoutMsg"></p>
+
+    <p style="margin-top:1rem;"><button class="btn" id="logoutBtnDeveloper" type="button">Esci</button></p>
   </div>
 
   <div id="stateActive" style="display:none;">
@@ -3076,7 +3114,7 @@ async function handleProMe(request, env) {
   // sempre fresco da D1 (mai dal voucher), stesso principio di handleHash.
   const convention = await matchConvention(env, email);
   const apiKey = await env.DB.prepare(
-    `SELECT id FROM agent_credentials WHERE owner_email = ? AND revoked = 0 LIMIT 1`
+    `SELECT id, dev_app_name, dev_os, dev_environment FROM agent_credentials WHERE owner_email = ? AND revoked = 0 LIMIT 1`
   ).bind(email).first().catch(() => null);
 
   // Contratto effettivo (richiesta gestore 18/7): UNA riga chiara su quale
@@ -3115,6 +3153,9 @@ async function handleProMe(request, env) {
     usage: { month: ym, used: usedRow?.c || 0, quota },
     profile: sub && (sub.segment || sub.region) ? { segment: sub.segment, region: sub.region } : null,
     pricing: pricing ? { amount_cents: pricing.amount_cents, label: pricing.label, currency: pricing.currency } : null,
+    dev_profile: apiKey && (apiKey.dev_app_name || apiKey.dev_os || apiKey.dev_environment)
+      ? { app_name: apiKey.dev_app_name, os: apiKey.dev_os, environment: apiKey.dev_environment }
+      : null,
   });
 }
 
@@ -3175,6 +3216,47 @@ async function handleProProfile(request, env) {
     await env.DB.prepare(
       `UPDATE pro_subscriptions SET segment = ?, region = ?, profile_consent_at = ? WHERE id = ?`
     ).bind(segment, region, consentAt, sub.id).run();
+  } catch {
+    return jsonResponse({ error: "Errore interno." }, 500);
+  }
+  return jsonResponse({ ok: true });
+}
+
+// POST /api/pro/dev-profile — profilazione facoltativa della fascia
+// Sviluppatore (richiesta gestore 18/7): applicazione/progetto, sistema
+// operativo, ambiente di sviluppo. Vive sulla chiave API (owner_email),
+// visibile solo al titolare e al gestore — mai pubblica. Stesso pattern di
+// handleProProfile: consenso obbligatorio per salvare, azzerabile in ogni
+// momento dall'interessato.
+async function handleProDevProfile(request, env) {
+  if (!env?.DB) return jsonResponse({ error: "Servizio non disponibile." }, 503);
+  const token = request.headers.get("X-SG-Voucher") || "";
+  const payload = token ? await verifyVoucher(env, token) : null;
+  if (!payload) return jsonResponse({ error: "voucher_scaduto" }, 403);
+  const email = payload.email;
+
+  let body;
+  try { body = await request.json(); } catch { return jsonResponse({ error: "Corpo non valido." }, 400); }
+
+  const key = await env.DB.prepare(
+    `SELECT id FROM agent_credentials WHERE owner_email = ? AND revoked = 0 LIMIT 1`
+  ).bind(email).first().catch(() => null);
+  if (!key) return jsonResponse({ error: "Nessuna chiave API attiva per questa email." }, 404);
+
+  let appName = null, os = null, environment = null, consentAt = null;
+  if (body?.clear !== true) {
+    appName     = body?.app_name ? String(body.app_name).trim().slice(0, 200) : null;
+    os          = body?.os ? String(body.os) : null;
+    environment = body?.environment ? String(body.environment).trim().slice(0, 200) : null;
+    if (os && !DEV_OS_OPTIONS.includes(os)) return jsonResponse({ error: "Sistema operativo non valido." }, 400);
+    if ((appName || os || environment) && !body?.consent) return jsonResponse({ error: "Consenso mancante." }, 400);
+    if (appName || os || environment) consentAt = Date.now();
+  }
+
+  try {
+    await env.DB.prepare(
+      `UPDATE agent_credentials SET dev_app_name = ?, dev_os = ?, dev_environment = ?, dev_profile_consent_at = ? WHERE id = ?`
+    ).bind(appName, os, environment, consentAt, key.id).run();
   } catch {
     return jsonResponse({ error: "Errore interno." }, 500);
   }
