@@ -1169,6 +1169,22 @@ async function handleAdminKeysIssue(request, env) {
   if (!label) return jsonResponse({ error: "Etichetta mancante." }, 400);
   if (!Number.isInteger(quota) || quota <= 0) return jsonResponse({ error: "Quota non valida." }, 400);
 
+  // P28 (modello B): chiave di produzione per una software house partner,
+  // taggata con la convenzione del pool (nessun dominio email reale coinvolto,
+  // vedi §2 design — matchConvention non la incontrerà mai). owner_email qui
+  // è il contatto del partner (non un utente finale), usato come member_email
+  // nella contabilità del pool (accountConventionUsage): senza, l'INSERT di
+  // convention_attestations fallirebbe (member_email è NOT NULL).
+  const conventionId = body?.convention_id ? String(body.convention_id).trim().slice(0, 100) : null;
+  let ownerEmail = body?.owner_email ? String(body.owner_email).trim().toLowerCase().slice(0, 200) : null;
+  if (conventionId) {
+    const conv = await env.DB.prepare(`SELECT id FROM conventions WHERE id = ?`).bind(conventionId).first();
+    if (!conv) return jsonResponse({ error: "Convenzione non trovata." }, 400);
+    if (!ownerEmail) return jsonResponse({ error: "Email titolare obbligatoria per una chiave in convenzione." }, 400);
+  } else {
+    ownerEmail = null;
+  }
+
   const id = randomHex(4); // 8 caratteri esadecimali
   const secret = randomBase64Url(32);
   const key = `sg_k_${id}_${secret}`;
@@ -1178,9 +1194,9 @@ async function handleAdminKeysIssue(request, env) {
 
   try {
     await env.DB.prepare(
-      `INSERT INTO agent_credentials (id, kind, secret_hash, label, quota, used, period, expires_at, revoked, created_at)
-       VALUES (?, 'key', ?, ?, ?, 0, ?, NULL, 0, ?)`
-    ).bind(id, secretHash, label, quota, period, createdAt).run();
+      `INSERT INTO agent_credentials (id, kind, secret_hash, label, quota, used, period, expires_at, revoked, created_at, owner_email, convention_id)
+       VALUES (?, 'key', ?, ?, ?, 0, ?, NULL, 0, ?, ?, ?)`
+    ).bind(id, secretHash, label, quota, period, createdAt, ownerEmail, conventionId).run();
   } catch {
     return jsonResponse({ error: "Errore interno." }, 500);
   }
@@ -1496,6 +1512,10 @@ function adminPageHtml() {
         <div><label for="newLabel">Etichetta (partner)</label><input id="newLabel" placeholder="Convenzione Accademia X"></div>
         <div style="flex:0 0 120px;"><label for="newQuota">Quota/mese</label><input id="newQuota" type="number" value="200" min="1"></div>
         <div style="flex:0 0 auto;"><button id="issueBtn">Emetti</button></div>
+      </div>
+      <div class="row" style="margin-top:.6rem;">
+        <div><label for="newConvId">Convenzione (facoltativo — P28 modello B, software house)</label><input id="newConvId" placeholder="slug es. partner-nomesoftware"></div>
+        <div><label for="newOwnerEmail">Email titolare (obbligatoria se in convenzione)</label><input id="newOwnerEmail" type="email" placeholder="contatto@partner.it"></div>
       </div>
       <p class="msg" id="issueMsg"></p>
       <div class="newkey" id="newKeyBox" style="display:none;"></div>

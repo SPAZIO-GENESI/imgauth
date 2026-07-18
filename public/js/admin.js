@@ -227,18 +227,25 @@
   document.getElementById("issueBtn").addEventListener("click", function () {
     var label = document.getElementById("newLabel").value.trim();
     var quota = parseInt(document.getElementById("newQuota").value, 10);
+    var convId = document.getElementById("newConvId").value.trim();
+    var ownerEmail = document.getElementById("newOwnerEmail").value.trim();
     var issueMsg = document.getElementById("issueMsg");
     var box = document.getElementById("newKeyBox");
     box.style.display = "none";
     if (!label) { issueMsg.textContent = "Serve un'etichetta."; issueMsg.className = "msg err"; return; }
+    if (convId && !ownerEmail) { issueMsg.textContent = "Serve l'email del titolare per una chiave in convenzione."; issueMsg.className = "msg err"; return; }
     issueMsg.textContent = "Emissione…"; issueMsg.className = "msg";
-    api("/admin/api/keys", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ label: label, quota: quota }) })
+    var payload = { label: label, quota: quota };
+    if (convId) { payload.convention_id = convId; payload.owner_email = ownerEmail; }
+    api("/admin/api/keys", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) })
       .then(function (data) {
         issueMsg.textContent = "Fatto. Copia la chiave ora — non sarà più recuperabile.";
         issueMsg.className = "msg ok";
         box.textContent = data.key;
         box.style.display = "";
         document.getElementById("newLabel").value = "";
+        document.getElementById("newConvId").value = "";
+        document.getElementById("newOwnerEmail").value = "";
         loadKeys();
       })
       .catch(function (e) { if (e.message !== "unauthorized") { issueMsg.textContent = e.message; issueMsg.className = "msg err"; } });
