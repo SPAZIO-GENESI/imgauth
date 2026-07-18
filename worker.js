@@ -4530,7 +4530,7 @@ async function handleIntegrationsPage(env) {
   .intcard h2 { font-size:1rem; margin:.6rem 0 .4rem; }
   .intcard p { font-size:.88rem; color:var(--ink); margin:.2rem 0 .6rem; }
   .intcard a { font-size:.82rem; word-break:break-all; }
-  .intlogo { width:48px; height:48px; object-fit:contain; border-radius:8px; background:#fff; border:1px solid var(--line); }
+  .intlogo { width:88px; height:88px; object-fit:contain; border-radius:10px; background:#fff; border:1px solid var(--line); padding:.4rem; }
   .intlogo-ph { background:#f2f0ea; }
 </style>
 </head>
