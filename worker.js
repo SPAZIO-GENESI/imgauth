@@ -2987,7 +2987,7 @@ function profiloPageHtml(env) {
     <div class="actions"><a class="btn" href="/developer/keys">Gestisci la tua chiave API</a></div>
 
     <h2 style="margin-top:1.3rem;">Il tuo progetto (facoltativo)</h2>
-    <p class="muted">Facoltativo, visibile solo a te e a noi. Ci aiuta a capire chi sta costruendo cosa.</p>
+    <p class="muted">Facoltativo, visibile solo a te e a noi. Ci aiuta a proporti condizioni di vantaggio e convenzioni quando disponibili.</p>
     <div class="formrow">
       <div><label for="devAppName">Applicazione/progetto</label><input id="devAppName" placeholder="es. il mio bot Telegram"></div>
       <div><label for="devOs">Sistema operativo</label><select id="devOs"><option value="">—</option>${devOsOptions}</select></div>
