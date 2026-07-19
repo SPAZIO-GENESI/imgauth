@@ -33,7 +33,7 @@ privacy del sito (hash calcolato in locale, mai i byte del file).
 ### Chiave API self-service (dalla 1.19.0, LinkedIn dalla 1.20.0)
 
 Terza via di emissione della stessa `sg_k_…` (non un terzo tipo di
-credenziale): [`/developer/keys`](https://imgauth.spaziogenesi.org/developer/keys)
+credenziale): [`/developer/keys`](https://attestazione.spaziogenesi.org/developer/keys/)
 emette una chiave in autonomia dopo aver verificato la tua email con un login
 **one-shot** Google, Microsoft o LinkedIn (scope minimo `openid email` — non è
 un account, non lasciamo cookie né token del provider: una sola chiamata per
@@ -50,7 +50,7 @@ la tua email verificata ti autentica, un voucher firmato stateless (mai un
 cookie) vive solo nel browser. Attivazione, stato, log delle ricariche,
 consumo del mese e archivio dei certificati (con il canale con cui ciascuno
 è stato prodotto: sito, API, MCP, bot Telegram) su
-[`/profilo`](https://imgauth.spaziogenesi.org/profilo). Gestione
+[`/profilo`](https://attestazione.spaziogenesi.org/profilo/). Gestione
 dell'abbonamento (fatture, metodo di pagamento, cessazione) interamente sul
 Customer Portal Stripe — nessun dato di pagamento tocca mai questo Worker.
 
@@ -62,7 +62,7 @@ esaurita o scaduta.
 
 Contratto completo in formato OpenAPI 3.0: [`/openapi.json`](https://imgauth.spaziogenesi.org/openapi.json)
 (machine-readable, importabile in Postman/Insomnia/Swagger UI) o
-[`/docs`](https://imgauth.spaziogenesi.org/docs) per la stessa documentazione
+[`/docs`](https://attestazione.spaziogenesi.org/docs/) per la stessa documentazione
 in una pagina leggibile — auto-ospitata, nessuna dipendenza di terze parti.
 
 ## Licenza

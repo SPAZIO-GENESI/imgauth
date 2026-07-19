@@ -102,6 +102,10 @@ Il tag git `vX.Y.Z` sul commit di rilascio resta la convenzione in vigore
 4. Approvare il job `production` su GitHub → preview a 0% → promozione.
 5. Smoke di produzione: `/ping` (versione attesa), `/api/status` tutto verde.
 6. Tag `vX.Y.Z` se c'è bump di versione; aggiornare doc secondo convenzione.
+7. Se il rilascio tocca `openapi.json`: lanciare a mano il workflow
+   `sync-openapi.yml` su imgauthweb (Actions → Run workflow) — la Swagger UI
+   statica su `attestazione.spaziogenesi.org/docs/` legge una copia locale,
+   sincronizzata altrimenti solo dal cron settimanale (P29 FASE 1).
 
 ### Hotfix urgente
 Identico al rilascio ordinario — la catena È la via veloce (staging

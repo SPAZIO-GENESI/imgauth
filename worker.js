@@ -1768,7 +1768,16 @@ export default {
     if (method === "GET"  && path === "/api/status")   return withPublicCors(await handleStatus(env, ctx));
     if (method === "GET"  && path === "/api/status-history") return withPublicCors(await handleStatusHistory(env, ctx));
     if (method === "GET"  && path === "/api/health-log") return withPublicCors(await handleHealthLog(url, env));
-    if (method === "GET"  && path.startsWith("/c/"))   return handleCertPage(path, env);
+    if (method === "GET"  && path.startsWith("/c/")) {
+      // P29 FASE 5 (decisione gestore): su imgauth.spaziogenesi.org la
+      // pagina fa 301 verso la canonica su attestazione (route Cloudflare
+      // attestazione.spaziogenesi.org/c/* invariata, serve la pagina come
+      // sempre — QR e certificati stampano già quell'URL).
+      if (url.hostname !== "attestazione.spaziogenesi.org") {
+        return permanentRedirect(`${CERT_PAGE_BASE}${path}`);
+      }
+      return handleCertPage(path, env);
+    }
     if (method === "POST" && path === "/api/agent/authorize") return handleAgentAuthorize(env);
     if (method === "POST" && path === "/api/agent/approve")   return handleAgentApprove(request, env, ctx);
     if (method === "GET"  && path === "/api/agent/token")     return handleAgentToken(url, env);
