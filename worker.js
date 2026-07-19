@@ -723,30 +723,6 @@ async function sweepExpiredAgentRows(env) {
 // la chiave. Post-moderazione dal pannello /admin (FASE 2): Telegram a ogni
 // emissione, revoca a un tap. Vedi P22-DESIGN-selfservice-keys.md.
 
-// GET /developer/keys — pagina di ingresso: spiega il servizio, informativa
-// privacy sintetica nel punto di raccolta, bottoni "Continua con …" solo per
-// i provider effettivamente configurati (client id + secret presenti).
-function devKeysPageHtml(env) {
-  const quota = Number(env?.DEV_KEY_QUOTA) || DEV_KEY_QUOTA_DEFAULT;
-  const buttons = Object.entries(DEV_PROVIDERS)
-    .filter(([, cfg]) => env?.[cfg.clientIdVar] && env?.[cfg.clientSecretVar])
-    .map(([key, cfg]) => `<a class="btn primary" href="/api/dev/oauth/start?provider=${key}">Continua con ${escHtml(cfg.label)}</a>`);
-
-  const body = `<h1>Chiave API per sviluppatori</h1>
-    <p class="lead">Verifica la tua email per ottenere subito una chiave <code>sg_k_…</code> con
-    <b>${quota} attestazioni al mese</b>, da usare come bearer su <code>/api/hash</code> per saltare
-    la verifica anti-bot (HMAC, marca temporale e limiti per-IP restano invariati).</p>
-    <p class="muted">Cosa salviamo: la tua email, il provider scelto e la data di emissione — solo
-    per erogare la chiave, moderarne l'uso (avviso e revoca in caso di abuso) e, su tua richiesta,
-    cancellarli. Non conserviamo il token del provider, non creiamo una sessione, non facciamo
-    marketing. Dettagli nella
-    <a href="${CERT_PAGE_BASE}/privacy.html">informativa privacy</a>.</p>
-    <div class="actions">${buttons.join("") || '<span class="muted">Nessun provider è al momento configurato.</span>'}</div>
-    <p class="foot" style="margin-top:1.4rem;">Serve una quota più alta o un accesso via convenzione?
-    Scrivi a <a href="mailto:it@spaziogenesi.org">it@spaziogenesi.org</a>.</p>`;
-  return certPageShell("Chiave API sviluppatori", body);
-}
-
 // GET /api/dev/oauth/start?provider=google|microsoft|linkedin[&purpose=attest|profile]
 // — apre lo state anti-CSRF (riga effimera in D1, nessun nuovo segreto di
 // firma: lo state È il record) e reindirizza all'authorize URL del provider.
@@ -785,34 +761,6 @@ async function handleDevOAuthStart(url, env) {
   authUrl.searchParams.set("state", state);
   authUrl.searchParams.set("prompt", "select_account");
   return Response.redirect(authUrl.toString(), 302);
-}
-
-function devAlreadyActiveBody(id) {
-  return `<h1>Hai già una chiave attiva</h1>
-    <p class="lead">Il tuo indirizzo email ha già una chiave self-service attiva
-    (id <span class="fingerprint">${escHtml(id)}</span>).</p>
-    <p class="muted">Puoi continuare a usare quella chiave. Se l'hai persa, o vuoi revocarla per
-    riceverne una nuova, scrivi a <a href="mailto:it@spaziogenesi.org">it@spaziogenesi.org</a>.</p>`;
-}
-
-function devKeyIssuedBody(key, quota, convention) {
-  const convNote = convention
-    ? `<p class="muted">Chiave emessa nell'ambito della convenzione con <strong>${escHtml(convention.name)}</strong> —
-       valida fino al ${escHtml(new Date(convention.ends_at).toLocaleDateString("it-IT"))}; i certificati emessi
-       con questa chiave godono della garanzia di persistenza prevista dalla convenzione.</p>`
-    : "";
-  return `<h1>Chiave creata ✓</h1>
-    <p class="lead">Copiala ora: per motivi di sicurezza non potremo più mostrartela.</p>
-    <div class="fingerprint" style="background:#fdf6e3;border:1px solid var(--oro);padding:.7rem .8rem;border-radius:8px;margin:1rem 0;">${escHtml(key)}</div>
-    <p class="muted">Quota: ${quota} attestazioni al mese, come header
-    <span class="fingerprint">Authorization: Bearer ${escHtml(key)}</span> su <code>POST /api/hash</code>.
-    Se la perdi: scrivi a <a href="mailto:it@spaziogenesi.org">it@spaziogenesi.org</a> per la revoca,
-    poi torna qui per riemetterne una nuova.</p>
-    ${convNote}
-    <div class="actions">
-      <a class="btn primary" href="/docs">Documentazione API</a>
-      <a class="btn" href="https://github.com/SPAZIO-GENESI/attest-mcp">Server MCP</a>
-    </div>`;
 }
 
 // P25 (B): match dominio email → convenzione attiva. Domini elencati per
@@ -974,34 +922,37 @@ async function accountProUsage(env, ctx, { subscriptionId, email, channel, sha25
   }
 }
 
+// P29 FASE 3: pagina /developer/keys statica su authweb — nessun esito del
+// percorso purpose='key' (default) renderizza più HTML dal Worker: 302 con
+// la chiave (o l'errore) SOLO nel fragment, mai in una risposta del server
+// né in un log. Quando il purpose non è ancora ricostruibile (provider
+// invalido/non configurato, consenso annullato, richiesta malformata, state
+// sconosciuto/scaduto — tutti PRIMA di uno state valido) si assume il
+// default 'key': è l'unico caso ambiguo, i purpose 'attest'/'profile' hanno
+// sempre uno state valido a quel punto (vedi gotcha §9 del design doc).
+const DEV_KEYS_PAGE_URL = `${CERT_PAGE_BASE}/developer/keys/`;
+function devKeysRedirect(code) {
+  return Response.redirect(`${DEV_KEYS_PAGE_URL}#sgerr=${encodeURIComponent(code)}`, 302);
+}
+
 // GET /api/dev/oauth/callback/<provider>?code=&state= — scambia il code,
 // legge l'email verificata da userinfo e scarta il token, poi emette (o
-// rifiuta se già esiste) la chiave sg_k_… per quell'email.
+// rifiuta se già esiste) la chiave sg_k_… per quell'email. I purpose
+// 'attest'/'profile' restano invariati (voucher nel fragment, HTML solo per
+// i loro errori di token/userinfo — fuori perimetro P29, girano già su
+// authweb/profilo dalla P25/P27).
 async function handleDevOAuthCallback(url, provider, env, ctx) {
   const cfg = DEV_PROVIDERS[provider];
-  if (!cfg) {
-    return htmlResponse(certPageShell("Provider non valido",
-      `<p class="lead">Provider OAuth non riconosciuto.</p>`), 400);
-  }
+  if (!cfg) return devKeysRedirect("provider");
   const clientId = env?.[cfg.clientIdVar];
   const clientSecret = env?.[cfg.clientSecretVar];
-  if (!clientId || !clientSecret || !env?.DB) {
-    return htmlResponse(certPageShell("Servizio non disponibile",
-      `<p class="lead">Questo provider non è al momento configurato. Riprova più tardi o usa l'altro.</p>`), 503);
-  }
+  if (!clientId || !clientSecret || !env?.DB) return devKeysRedirect("provider");
 
-  if (url.searchParams.get("error")) {
-    return htmlResponse(certPageShell("Richiesta annullata",
-      `<p class="lead">L'accesso non è stato completato. Torna alla pagina
-      <a href="/developer/keys">Chiave API sviluppatori</a> e riprova quando vuoi.</p>`), 200);
-  }
+  if (url.searchParams.get("error")) return devKeysRedirect("annullata");
 
   const code = url.searchParams.get("code") || "";
   const state = url.searchParams.get("state") || "";
-  if (!code || !state) {
-    return htmlResponse(certPageShell("Richiesta non valida",
-      `<p class="lead">Parametri mancanti. Riparti da <a href="/developer/keys">qui</a>.</p>`), 400);
-  }
+  if (!code || !state) return devKeysRedirect("richiesta");
 
   // Stato anti-CSRF ad uso singolo: letto e cancellato subito, chiunque lo
   // riusi (replay) trova la riga già sparita.
@@ -1010,13 +961,12 @@ async function handleDevOAuthCallback(url, provider, env, ctx) {
     stateRow = await env.DB.prepare(`SELECT provider, expires_at, purpose FROM dev_oauth_state WHERE state = ?`).bind(state).first();
     if (stateRow) await env.DB.prepare(`DELETE FROM dev_oauth_state WHERE state = ?`).bind(state).run();
   } catch {
-    return htmlResponse(certPageShell("Errore", `<p class="lead">Errore interno. Riprova.</p>`), 500);
+    return devKeysRedirect("interno");
   }
   if (!stateRow || stateRow.provider !== provider || Date.now() > stateRow.expires_at) {
-    return htmlResponse(certPageShell("Sessione scaduta",
-      `<p class="lead">Questa richiesta di accesso è scaduta o non è valida. Torna a
-      <a href="/developer/keys">Chiave API sviluppatori</a> e riprova.</p>`), 400);
+    return devKeysRedirect("scaduta");
   }
+  const isVoucherPurpose = stateRow.purpose === "attest" || stateRow.purpose === "profile";
 
   const redirectUri = `${url.origin}/api/dev/oauth/callback/${provider}`;
   const tokenBody = new URLSearchParams({
@@ -1032,15 +982,18 @@ async function handleDevOAuthCallback(url, provider, env, ctx) {
     body: tokenBody.toString(),
   });
   if (!tokenRes || !tokenRes.ok) {
+    if (!isVoucherPurpose) return devKeysRedirect("interno");
     return htmlResponse(certPageShell("Accesso non riuscito",
       `<p class="lead">Non siamo riusciti a completare l'accesso con ${escHtml(cfg.label)}. Riprova.</p>`), 502);
   }
   let tokenJson;
   try { tokenJson = await tokenRes.json(); } catch {
+    if (!isVoucherPurpose) return devKeysRedirect("interno");
     return htmlResponse(certPageShell("Accesso non riuscito", `<p class="lead">Risposta non valida dal provider. Riprova.</p>`), 502);
   }
   const accessToken = tokenJson?.access_token;
   if (!accessToken) {
+    if (!isVoucherPurpose) return devKeysRedirect("interno");
     return htmlResponse(certPageShell("Accesso non riuscito", `<p class="lead">Il provider non ha restituito un token valido. Riprova.</p>`), 502);
   }
 
@@ -1048,22 +1001,26 @@ async function handleDevOAuthCallback(url, provider, env, ctx) {
     headers: { Authorization: `Bearer ${accessToken}` },
   });
   if (!userRes || !userRes.ok) {
+    if (!isVoucherPurpose) return devKeysRedirect("interno");
     return htmlResponse(certPageShell("Accesso non riuscito",
       `<p class="lead">Non siamo riusciti a leggere l'email dal tuo account ${escHtml(cfg.label)}. Riprova.</p>`), 502);
   }
   let userJson;
   try { userJson = await userRes.json(); } catch {
+    if (!isVoucherPurpose) return devKeysRedirect("interno");
     return htmlResponse(certPageShell("Accesso non riuscito", `<p class="lead">Risposta non valida dal provider. Riprova.</p>`), 502);
   }
   // Da qui in poi accessToken/tokenJson/userJson non sono più referenziati:
   // niente store, niente log (invariante 4 del design).
 
   if ((provider === "google" || provider === "linkedin") && userJson?.email_verified === false) {
+    if (!isVoucherPurpose) return devKeysRedirect("non-verificata");
     return htmlResponse(certPageShell("Email non verificata",
       `<p class="lead">Il tuo account ${escHtml(cfg.label)} non ha un'email verificata. Usa un altro account o un altro provider.</p>`), 403);
   }
   const rawEmail = userJson?.email;
   if (!rawEmail || typeof rawEmail !== "string") {
+    if (!isVoucherPurpose) return devKeysRedirect("email");
     return htmlResponse(certPageShell("Email non disponibile",
       `<p class="lead">Il tuo account non espone un indirizzo email leggibile. Prova con l'altro provider.</p>`), 403);
   }
@@ -1076,7 +1033,7 @@ async function handleDevOAuthCallback(url, provider, env, ctx) {
   // formato di voucher per entrambi (§2 del design: "un voucher ottenuto per
   // il profilo vale anche per attestare e viceversa"). Il token/l'email non
   // sono mai persistiti oltre questo punto (invariante 2 del design P25).
-  if (stateRow.purpose === "attest" || stateRow.purpose === "profile") {
+  if (isVoucherPurpose) {
     if (!env?.HMAC_SECRET) {
       return htmlResponse(certPageShell("Servizio non disponibile",
         `<p class="lead">Questo percorso non è al momento disponibile. Riprova più tardi.</p>`), 503);
@@ -1099,10 +1056,10 @@ async function handleDevOAuthCallback(url, provider, env, ctx) {
   try {
     existing = await env.DB.prepare(`SELECT id FROM agent_credentials WHERE owner_email = ? AND revoked = 0`).bind(email).first();
   } catch {
-    return htmlResponse(certPageShell("Errore", `<p class="lead">Errore interno. Riprova.</p>`), 500);
+    return devKeysRedirect("interno");
   }
   if (existing) {
-    return htmlResponse(certPageShell("Chiave già attiva", devAlreadyActiveBody(existing.id)), 200);
+    return Response.redirect(`${DEV_KEYS_PAGE_URL}#sgstate=gia-attiva&id=${encodeURIComponent(existing.id)}`, 302);
   }
 
   // P25 (B): dominio dell'email ∈ convenzione attiva? Se sì, la chiave nasce
@@ -1133,8 +1090,8 @@ async function handleDevOAuthCallback(url, provider, env, ctx) {
     try {
       raced = await env.DB.prepare(`SELECT id FROM agent_credentials WHERE owner_email = ? AND revoked = 0`).bind(email).first();
     } catch { /* raced resta undefined: si cade nell'errore generico sotto */ }
-    if (raced) return htmlResponse(certPageShell("Chiave già attiva", devAlreadyActiveBody(raced.id)), 200);
-    return htmlResponse(certPageShell("Errore", `<p class="lead">Errore interno. Riprova.</p>`), 500);
+    if (raced) return Response.redirect(`${DEV_KEYS_PAGE_URL}#sgstate=gia-attiva&id=${encodeURIComponent(raced.id)}`, 302);
+    return devKeysRedirect("interno");
   }
 
   if (ctx && typeof ctx.waitUntil === "function") {
@@ -1144,7 +1101,9 @@ async function handleDevOAuthCallback(url, provider, env, ctx) {
     ).catch(() => {}));
   }
 
-  return htmlResponse(certPageShell("Chiave API sviluppatori", devKeyIssuedBody(key, quota, convention)));
+  const fragment = new URLSearchParams({ sgk: key, q: String(quota) });
+  if (convention) fragment.set("conv", convention.id);
+  return Response.redirect(`${DEV_KEYS_PAGE_URL}#${fragment.toString()}`, 302);
 }
 
 // ── Pannello admin credenziali agente (P21 follow-up) ───────────────────────
@@ -1820,7 +1779,7 @@ export default {
     if (method === "POST" && path === "/api/agent/approve")   return handleAgentApprove(request, env, ctx);
     if (method === "GET"  && path === "/api/agent/token")     return handleAgentToken(url, env);
     if (method === "GET"  && path === "/agent/authorize")     return handleAgentAuthorizePage(url, env);
-    if (method === "GET"  && path === "/developer/keys")      return htmlResponse(devKeysPageHtml(env));
+    if (method === "GET"  && path === "/developer/keys")      return permanentRedirect(DEV_KEYS_PAGE_URL);
     if (method === "GET"  && path === "/api/dev/oauth/start") return handleDevOAuthStart(url, env);
     if (method === "GET"  && path.startsWith("/api/dev/oauth/callback/")) {
       const provider = path.slice("/api/dev/oauth/callback/".length);
