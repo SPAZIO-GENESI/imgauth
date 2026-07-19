@@ -102,14 +102,9 @@ const DEV_OWNER_RETENTION_MS  = 180 * 24 * 60 * 60 * 1000;   // 180 giorni post-
 const VOUCHER_TTL_MS = 8 * 60 * 60 * 1000;
 
 // Profilazione facoltativa in /profilo (P27 §7, decisione gestore 17/7):
-// valori ammessi, condivisi fra il rendering server della pagina e la
-// validazione di POST /api/pro/profile.
+// valori ammessi per la validazione di POST /api/pro/profile (le etichette
+// italiane vivono ora nel guscio statico su authweb, P29 FASE 4).
 const PRO_SEGMENTS = ["artista_visivo", "fotografo", "designer", "studio_agenzia", "ente_istituzione", "legale_notarile", "altro"];
-const PRO_SEGMENT_LABELS = {
-  artista_visivo: "Artista visivo", fotografo: "Fotografo", designer: "Designer",
-  studio_agenzia: "Studio o agenzia", ente_istituzione: "Ente o istituzione",
-  legale_notarile: "Ambito legale-notarile", altro: "Altro",
-};
 const IT_REGIONS = [
   "Abruzzo", "Basilicata", "Calabria", "Campania", "Emilia-Romagna", "Friuli-Venezia Giulia",
   "Lazio", "Liguria", "Lombardia", "Marche", "Molise", "Piemonte", "Puglia", "Sardegna",
@@ -1045,10 +1040,9 @@ async function handleDevOAuthCallback(url, provider, env, ctx) {
     } catch {
       return htmlResponse(certPageShell("Errore", `<p class="lead">Errore interno. Riprova.</p>`), 500);
     }
-    // 'profile' resta sul Worker (url.origin: funziona anche in locale, a
-    // differenza di CERT_PAGE_BASE che è il dominio authweb); 'attest' va
-    // sul sito come da P25.
-    const target = stateRow.purpose === "profile" ? `${url.origin}/profilo` : `${CERT_PAGE_BASE}/`;
+    // P29 FASE 4: /profilo vive ora su authweb (era url.origin, il Worker
+    // stesso) — entrambi i purpose finiscono sullo stesso dominio.
+    const target = stateRow.purpose === "profile" ? `${CERT_PAGE_BASE}/profilo/` : `${CERT_PAGE_BASE}/`;
     return Response.redirect(`${target}#sgv=${encodeURIComponent(voucher)}`, 302);
   }
 
@@ -1811,7 +1805,7 @@ export default {
     if (method === "POST" && path === "/api/pro/checkout")       return handleProCheckout(request, url, env, ctx);
     if (method === "POST" && path === "/api/pro/stripe-webhook") return handleStripeWebhook(request, env, ctx);
     if (method === "POST" && path === "/api/pro/portal")         return handleProPortal(request, url, env, ctx);
-    if (method === "GET"  && path === "/profilo")                return htmlResponse(profiloPageHtml(env));
+    if (method === "GET"  && path === "/profilo")                return permanentRedirect(`${CERT_PAGE_BASE}/profilo/`);
     if (method === "GET"  && path === "/api/pro/me")             return handleProMe(request, env);
     if (method === "GET"  && path === "/api/pro/certificates")   return handleProCertificates(request, url, env);
     if (method === "POST" && path === "/api/pro/profile")        return handleProProfile(request, env);
@@ -2615,8 +2609,8 @@ async function handleProCheckout(request, url, env, ctx) {
       subscription_data: {
         metadata: { email, pricing_id: pricing.id, discount_code: discount ? discount.code : "" },
       },
-      success_url: `${url.origin}/profilo?checkout=success`,
-      cancel_url: `${url.origin}/profilo?checkout=cancel`,
+      success_url: `${CERT_PAGE_BASE}/profilo/?checkout=success`,
+      cancel_url: `${CERT_PAGE_BASE}/profilo/?checkout=cancel`,
     });
   } catch {
     return jsonResponse({ error: "Errore nella creazione della sessione di pagamento." }, 502);
@@ -2930,242 +2924,13 @@ async function handleProPortal(request, url, env, ctx) {
   try {
     session = await stripe.billingPortal.sessions.create({
       customer: row.stripe_customer_id,
-      return_url: `${url.origin}/profilo`,
+      return_url: `${CERT_PAGE_BASE}/profilo/`,
     });
   } catch {
     return jsonResponse({ error: "Errore nella creazione della sessione del portale." }, 502);
   }
 
   return jsonResponse({ url: session.url });
-}
-
-// ── Pagina profilo /profilo (P27 §7) ─────────────────────────────────────────
-// Pagina HTML servita dal Worker (stesso pattern di /developer/keys e
-// /admin: shell server-rendered, dati caricati via fetch dal browser).
-// ZERO JS inline: la logica vive in public/js/profilo.js (Static Assets).
-function profiloPageHtml(env) {
-  const buttons = Object.entries(DEV_PROVIDERS)
-    .filter(([, cfg]) => env?.[cfg.clientIdVar] && env?.[cfg.clientSecretVar])
-    .map(([key, cfg]) => `<a class="btn primary" href="/api/dev/oauth/start?provider=${key}&purpose=profile">Continua con ${escHtml(cfg.label)}</a>`)
-    .join("");
-  const regionOptions = IT_REGIONS.map(r => `<option value="${escHtml(r)}">${escHtml(r)}</option>`).join("");
-  const segmentOptions = PRO_SEGMENTS.map(s => `<option value="${s}">${escHtml(PRO_SEGMENT_LABELS[s])}</option>`).join("");
-  const devOsOptions = DEV_OS_OPTIONS.map(o => `<option value="${escHtml(o)}">${escHtml(o)}</option>`).join("");
-
-  return `<!doctype html>
-<html lang="it">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Il tuo profilo Professionale — Spazio Genesi</title>
-<meta name="robots" content="noindex">
-<style>
-  :root { --oro:#8B6914; --bg:#faf8f4; --card:#fff; --ink:#1f1d18; --muted:#6b6453; --line:#e7e1d4; --danger:#a33; --ok:#2f6b2a; }
-  * { box-sizing:border-box; }
-  body { margin:0; background:var(--bg); color:var(--ink);
-    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
-    line-height:1.55; padding:1.5rem; }
-  .wrap { max-width:920px; margin:0 auto; }
-  h1 { font-size:1.5rem; margin:.2rem 0 .3rem; }
-  h2 { font-size:1.05rem; margin:0 0 .8rem; }
-  .lead { font-size:1.02rem; color:var(--ink); }
-  .muted { color:var(--muted); font-size:.88rem; }
-  a { color:var(--oro); }
-  .card { background:var(--card); border:1px solid var(--line); border-radius:12px;
-    padding:1.4rem 1.5rem; margin-bottom:1.1rem; box-shadow:0 1px 3px rgba(0,0,0,.04); }
-  .btn { display:inline-flex; align-items:center; gap:.45rem; text-decoration:none; font-size:.9rem;
-    font-weight:600; padding:.6rem 1.1rem; border-radius:9px; border:1px solid var(--line); color:var(--ink);
-    background:#fff; cursor:pointer; font-family:inherit; }
-  .btn.primary { background:var(--oro); color:#fff; border-color:var(--oro); }
-  .btn.danger { color:var(--danger); border-color:var(--danger); }
-  .btn:disabled { opacity:.5; cursor:default; }
-  .actions { display:flex; gap:.6rem; flex-wrap:wrap; margin-top:1rem; align-items:center; }
-  .row { display:flex; flex-wrap:wrap; gap:.2rem .9rem; padding:.65rem 0; border-bottom:1px solid var(--line); }
-  .row:last-child { border-bottom:none; }
-  .row .k { flex:0 0 11rem; color:var(--muted); font-size:.85rem; }
-  .row .v { flex:1 1 14rem; min-width:0; }
-  .bar { background:#f2f0ea; border-radius:999px; height:.55rem; overflow:hidden; margin-top:.5rem; }
-  .bar-fill { background:var(--oro); height:100%; }
-  table { border-collapse:collapse; width:100%; font-size:.86rem; }
-  .table-scroll { overflow-x:auto; }
-  th, td { border-bottom:1px solid var(--line); padding:.5rem .5rem; text-align:left; vertical-align:middle; }
-  th { color:var(--muted); font-weight:600; font-size:.76rem; text-transform:uppercase; letter-spacing:.02em; }
-  .fingerprint { font-family:ui-monospace,Consolas,monospace; font-size:.8rem; }
-  label { display:block; font-size:.82rem; color:var(--muted); margin-bottom:.25rem; }
-  input, select { font:inherit; padding:.5rem .6rem; border:1px solid var(--line); border-radius:7px; width:100%; }
-  .formrow { display:flex; gap:.8rem; flex-wrap:wrap; align-items:flex-end; margin-bottom:.5rem; }
-  .formrow > div { flex:1 1 200px; }
-  .msg { font-size:.85rem; margin-top:.6rem; }
-  .msg.err { color:var(--danger); }
-  .msg.ok { color:var(--ok); }
-  .consent { display:flex; align-items:flex-start; gap:.5rem; font-size:.85rem; color:var(--muted); margin:.7rem 0; }
-  .consent input { width:auto; margin-top:.2rem; }
-  .banner { border-radius:10px; padding:.9rem 1.1rem; font-size:.9rem; margin-bottom:1rem; }
-  .banner.warn { background:#fdf3e0; color:#6b4500; border:1px solid #eccf94; }
-  .banner.off { background:#f2f0ea; color:var(--ink); border:1px solid var(--line); }
-</style>
-</head>
-<body>
-<div class="wrap">
-  <h1>Il tuo profilo Professionale</h1>
-  <p class="muted">Senza account e senza password: la tua email verificata è la tua identità.</p>
-
-  <div class="card" id="identityBar" style="display:none;">
-    <div class="row"><span class="k">Accesso come</span><span class="v" id="identityEmail"></span></div>
-    <div class="row"><span class="k">Fascia</span><span class="v" id="identityFascia"></span></div>
-    <div class="row"><span class="k">Garanzia di recupero</span><span class="v" id="identityRetention"></span></div>
-  </div>
-
-  <div class="card" id="stateAnon">
-    <h2>Abbonati alla fascia Professionale</h2>
-    <p class="lead">Attestazioni con continuità, archivio con garanzia di recupero, canale dedicato.</p>
-    <div class="actions">${buttons || '<span class="muted">Nessun provider è al momento configurato.</span>'}</div>
-    <p class="muted" style="margin-top:1rem;">Vedi le <a href="https://attestazione.spaziogenesi.org/condizioni/">fasce e condizioni</a> complete.</p>
-  </div>
-
-  <div class="card" id="stateOnboard" style="display:none;">
-    <h2>Attiva l'abbonamento</h2>
-    <p class="lead" id="onboardPrice"></p>
-    <div class="formrow">
-      <div><label for="discountInput">Hai un codice?</label><input id="discountInput" placeholder="Facoltativo"></div>
-      <div style="flex:0 0 auto;"><button class="btn primary" id="checkoutBtn" type="button">Continua su Stripe</button></div>
-    </div>
-    <p class="msg" id="checkoutMsg"></p>
-    <button class="btn" id="logoutBtnOnboard" type="button">Esci</button>
-  </div>
-
-  <div class="card" id="stateDeveloper" style="display:none;">
-    <h2>Fascia Sviluppatore</h2>
-    <p class="lead">Sei in fascia Sviluppatore: pensata per <strong>costruire e testare</strong> la tua integrazione, non per farla girare in produzione — per questo la quota resta bassa (50 attestazioni al mese). Se il tuo progetto è (o sta per andare) in produzione, la fascia giusta è Professionale.</p>
-    <div class="actions"><a class="btn" href="/developer/keys">Gestisci la tua chiave API</a></div>
-
-    <h2 style="margin-top:1.3rem;">Il tuo progetto (facoltativo)</h2>
-    <p class="muted">Facoltativo, visibile solo a te e a noi. Ci aiuta a proporti condizioni di vantaggio e convenzioni quando disponibili.</p>
-    <div class="formrow">
-      <div><label for="devAppName">Applicazione/progetto</label><input id="devAppName" placeholder="es. il mio bot Telegram"></div>
-      <div><label for="devOs">Sistema operativo</label><select id="devOs"><option value="">—</option>${devOsOptions}</select></div>
-    </div>
-    <div class="formrow">
-      <div><label for="devEnvironment">Ambiente di sviluppo</label><input id="devEnvironment" placeholder="es. Claude Code, VS Code, script Python, n8n…"></div>
-    </div>
-    <label class="consent"><input type="checkbox" id="devProfileConsent"> Acconsento all'uso di questi dati facoltativi come descritto sopra.</label>
-    <div class="actions">
-      <button class="btn" id="saveDevProfileBtn" type="button">Salva</button>
-      <button class="btn danger" id="clearDevProfileBtn" type="button">Rimuovi questi dati</button>
-    </div>
-    <p class="msg" id="devProfileMsg"></p>
-
-    <h2 style="margin-top:1.3rem;border-top:1px solid var(--line);padding-top:1.1rem;">Passa a Professionale</h2>
-    <p class="lead" id="devOnboardPrice"></p>
-    <div class="formrow">
-      <div><label for="devDiscountInput">Hai un codice?</label><input id="devDiscountInput" placeholder="Facoltativo"></div>
-      <div style="flex:0 0 auto;"><button class="btn primary" id="devCheckoutBtn" type="button">Continua su Stripe</button></div>
-    </div>
-    <p class="msg" id="devCheckoutMsg"></p>
-
-    <p style="margin-top:1rem;"><button class="btn" id="logoutBtnDeveloper" type="button">Esci</button></p>
-  </div>
-
-  <div id="stateActive" style="display:none;">
-    <div class="card">
-      <div id="pastDueBanner" style="display:none;" class="banner warn">Il pagamento più recente non è riuscito. Aggiorna il metodo di pagamento dal portale entro pochi giorni, altrimenti l'abbonamento verrà sospeso.</div>
-      <div id="cancelScheduledBanner" style="display:none;" class="banner off">Cessazione programmata: l'abbonamento resta attivo fino alla scadenza già pagata, poi non si rinnova. Puoi annullare la cessazione dal portale.</div>
-      <h2>Stato abbonamento</h2>
-      <div class="row"><span class="k">Stato</span><span class="v" id="subStatus"></span></div>
-      <div class="row"><span class="k">Scadenza</span><span class="v" id="subPeriodEnd"></span></div>
-      <div class="row"><span class="k">Prezzo</span><span class="v" id="subPrice"></span></div>
-      <div class="actions">
-        <button class="btn primary" id="portalBtn" type="button">Gestisci o cessa l'abbonamento</button>
-        <button class="btn" id="logoutBtnActive" type="button">Esci</button>
-      </div>
-      <p class="msg" id="portalMsg"></p>
-    </div>
-
-    <div class="card">
-      <h2>Consumo del mese</h2>
-      <p class="lead" id="usageText"></p>
-      <div class="bar"><div class="bar-fill" id="usageBar" style="width:0%;"></div></div>
-    </div>
-
-    <div class="card">
-      <h2>Log ricariche</h2>
-      <div class="table-scroll"><table><thead><tr><th>Data</th><th>Evento</th><th>Dettaglio</th></tr></thead><tbody id="eventsBody"></tbody></table></div>
-    </div>
-
-    <div class="card">
-      <h2>Archivio certificati</h2>
-      <p class="muted">Solo i certificati emessi in fascia Professionale con questa email — quelli emessi in anonimo prima dell'abbonamento non sono attribuibili e non compaiono.</p>
-      <div class="table-scroll"><table><thead><tr><th>Data</th><th>Impronta</th><th>Canale</th><th></th></tr></thead><tbody id="certsBody"></tbody></table></div>
-      <div class="actions">
-        <button class="btn" id="certsPrevBtn" type="button">« Precedenti</button>
-        <span class="muted" id="certsPageInfo"></span>
-        <button class="btn" id="certsNextBtn" type="button">Successivi »</button>
-      </div>
-    </div>
-
-    <div class="card">
-      <h2>Il tuo settore</h2>
-      <p class="muted">Facoltativo. Ci aiuta a proporti condizioni di vantaggio e convenzioni quando disponibili.</p>
-      <div class="formrow">
-        <div><label for="segmentSelect">Segmento</label><select id="segmentSelect"><option value="">—</option>${segmentOptions}</select></div>
-        <div><label for="regionSelect">Regione</label><select id="regionSelect"><option value="">—</option>${regionOptions}</select></div>
-      </div>
-      <label class="consent"><input type="checkbox" id="profileConsent"> Acconsento all'uso di questi dati facoltativi come descritto sopra.</label>
-      <div class="actions">
-        <button class="btn" id="saveProfileBtn" type="button">Salva</button>
-        <button class="btn danger" id="clearProfileBtn" type="button">Rimuovi questi dati</button>
-      </div>
-      <p class="msg" id="profileMsg"></p>
-    </div>
-  </div>
-
-  <div class="card" id="integrationCard" style="display:none;">
-    <h2>La tua integrazione</h2>
-    <p class="muted">Hai costruito un'app o un servizio che usa l'attestazione? Candidala per la vetrina pubblica
-      <a href="/integrazioni">Integrazioni</a>. La pubblicazione richiede una verifica del gestore: nome,
-      URL, descrizione ed eventuale logo diventano pubblici — la tua email resta sempre privata.</p>
-    <div id="integrationStatusBanner" class="banner off" style="display:none;"></div>
-    <div class="formrow">
-      <div><label for="intAppName">Nome applicazione</label><input id="intAppName" maxlength="100" placeholder="es. Il mio bot Telegram"></div>
-      <div><label for="intUrl">URL (https://)</label><input id="intUrl" type="url" placeholder="https://…"></div>
-    </div>
-    <div class="formrow">
-      <div style="flex:1 1 100%;"><label for="intDescription">Descrizione (max 300 caratteri)</label><input id="intDescription" maxlength="300" placeholder="Cosa fa la tua app, in breve"></div>
-    </div>
-    <div class="actions">
-      <button class="btn primary" id="intSaveBtn" type="button">Candida / aggiorna</button>
-      <button class="btn danger" id="intWithdrawBtn" type="button" style="display:none;">Ritira candidatura</button>
-    </div>
-    <p class="msg" id="intMsg"></p>
-    <div id="intLogoSection" style="display:none;margin-top:1rem;border-top:1px solid var(--line);padding-top:1rem;">
-      <label for="intLogoInput">Logo (facoltativo — PNG, JPEG o WebP, max 200KB)</label>
-      <input id="intLogoInput" type="file" accept="image/png,image/jpeg,image/webp">
-      <div class="actions"><button class="btn" id="intLogoBtn" type="button">Carica logo</button></div>
-      <p class="msg" id="intLogoMsg"></p>
-    </div>
-    <div id="intBadgeSection" style="display:none;margin-top:1rem;border-top:1px solid var(--line);padding-top:1rem;">
-      <h2 style="font-size:1rem;">Badge "Funziona con Attestazione Spazio Genesi"</h2>
-      <p class="muted">Pubblicata: copia lo snippet per il tuo sito o repository.</p>
-      <label for="intBadgeHtml">HTML</label>
-      <textarea id="intBadgeHtml" readonly rows="2" style="width:100%;font-family:ui-monospace,Consolas,monospace;font-size:.78rem;"></textarea>
-      <div class="actions"><button class="btn" id="intBadgeHtmlCopy" type="button">Copia HTML</button></div>
-      <label for="intBadgeMd" style="margin-top:.6rem;">Markdown</label>
-      <textarea id="intBadgeMd" readonly rows="2" style="width:100%;font-family:ui-monospace,Consolas,monospace;font-size:.78rem;"></textarea>
-      <div class="actions"><button class="btn" id="intBadgeMdCopy" type="button">Copia Markdown</button></div>
-    </div>
-  </div>
-
-  <div class="card" id="stateCanceled" style="display:none;">
-    <div class="banner off">Abbonamento cessato il <span id="canceledDate"></span>. L'archivio resta consultabile e recuperabile (garanzia 5 anni dalla produzione di ciascun certificato); le nuove attestazioni con questa email tornano alla fascia Base.</div>
-    <div class="actions">
-      <button class="btn primary" id="reactivateBtn" type="button">Riattiva l'abbonamento</button>
-      <button class="btn" id="logoutBtnCanceled" type="button">Esci</button>
-    </div>
-  </div>
-</div>
-<script src="/js/profilo.js" defer></script>
-</body>
-</html>`;
 }
 
 // GET /api/pro/me — stato completo per la pagina profilo (voucher obbligatorio).
