@@ -58,6 +58,16 @@ jobs:
         run: node --input-type=module --check < worker.js
       - name: Contratto OpenAPI valido
         run: node -e "JSON.parse(require('fs').readFileSync('openapi.json','utf8'))"
+      - name: Versione openapi.json allineata a package.json
+        run: |
+          node -e "
+            const pkg = require('./package.json');
+            const spec = JSON.parse(require('fs').readFileSync('./openapi.json','utf8'));
+            if (pkg.version !== spec.info.version) {
+              console.error('openapi.json fermo a ' + spec.info.version + ', package.json e a ' + pkg.version + ': aggiorna openapi.json prima di rilasciare.');
+              process.exit(1);
+            }
+          "
       - name: Build dry-run (produzione)
         run: npx wrangler deploy --dry-run
 

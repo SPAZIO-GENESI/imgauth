@@ -2,7 +2,7 @@
   "openapi": "3.0.3",
   "info": {
     "title": "imgauth — API di attestazione opere digitali",
-    "version": "1.26.0",
+    "version": "1.29.0",
     "description": "Motore di attestazione Spazio Genesi ETS. Full privacy: l'impronta SHA-256 si calcola sul client, il file non viene mai inviato al server. Contratto reale in italiano (non tradurre i nomi campo). Vedi https://attestazione.spaziogenesi.org per l'interfaccia utente e https://github.com/SPAZIO-GENESI/imgauth per il codice sorgente (AGPL-3.0).",
     "contact": { "name": "Spazio Genesi ETS", "url": "https://spaziogenesi.org" },
     "license": { "name": "AGPL-3.0-only", "url": "https://github.com/SPAZIO-GENESI/imgauth/blob/main/LICENSE" }
@@ -17,6 +17,12 @@
         "scheme": "bearer",
         "bearerFormat": "sg_k_<id>_<secret> oppure sg_s_<id>_<secret>",
         "description": "Credenziale agente (P21): API key per convenzioni o session token da device flow. Sblocca SOLO il bypass della challenge Turnstile su POST /api/hash — HMAC, timestamp server e rate limit per-IP restano invariati. Facoltativa: senza header, il percorso Turnstile è identico a prima."
+      },
+      "voucherHeader": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-SG-Voucher",
+        "description": "Voucher firmato stateless (P25 §2.7): ottenuto SOLO tramite il flusso OAuth \"Attesta con la tua email\" sul sito — non c'è un endpoint pubblico in questo contratto che lo emette. TTL 8h. Bypassa il solo Turnstile su /api/hash e /api/cert-pdf, applica pool/tetto di un'eventuale convenzione o la fascia Professionale — stesso principio del bearer agente."
       }
     },
     "schemas": {
@@ -45,7 +51,7 @@
       "post": {
         "summary": "Attesta un'impronta SHA-256",
         "description": "Percorso primario (dalla 1.15.0): riceve l'impronta calcolata sul client (full privacy). Percorso legacy: file inline base64 in `image` (hash calcolato dal server, tetto 100 MB). Se assente una credenziale agente valida (vedi agentBearer), è richiesto `turnstile_token` quando TURNSTILE_SECRET è configurato.",
-        "security": [ { "agentBearer": [] }, {} ],
+        "security": [ { "agentBearer": [] }, { "voucherHeader": [] }, {} ],
         "requestBody": {
           "required": true,
           "content": { "application/json": { "schema": { "type": "object", "properties": {
@@ -103,7 +109,7 @@
       "post": {
         "summary": "Genera il certificato PDF firmato",
         "description": "Riceve l'oggetto restituito da POST /api/hash (deve includere `attestazione` + `hmac`, verificati server-side prima di firmare). Chiama authart server-to-server per la firma crittografica; archivia copia in R2.",
-        "security": [ { "agentBearer": [] }, {} ],
+        "security": [ { "agentBearer": [] }, { "voucherHeader": [] }, {} ],
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "description": "Oggetto completo restituito da POST /api/hash" } } } },
         "responses": {
           "200": { "description": "PDF firmato", "content": { "application/pdf": { "schema": { "type": "string", "format": "binary" } } } },
@@ -150,6 +156,16 @@
         }
       }
     },
+    "/api/badge/integration": {
+      "get": {
+        "summary": "Badge SVG \"Funziona con Attestazione Spazio Genesi\"",
+        "description": "Embeddabile via <img> nel sito del partner (P28). Verde solo se la candidatura con quell'id è 'approved' in vetrina; mai errore HTTP (id malformato o non approvata → badge grigio \"integrazione non verificata\").",
+        "parameters": [ { "name": "id", "in": "query", "required": true, "schema": { "type": "string", "pattern": "^int_[0-9a-f]{8}$" } } ],
+        "responses": {
+          "200": { "description": "SVG (verde 24h cache, grigio 60s cache)", "content": { "image/svg+xml": { "schema": { "type": "string" } } } }
+        }
+      }
+    },
     "/api/status": {
       "get": {
         "summary": "Stato semaforico dei servizi",
@@ -177,6 +193,17 @@
             "id": { "type": "string" }, "app_name": { "type": "string" }, "url": { "type": "string" }, "description": { "type": "string" }, "logo_url": { "type": "string", "nullable": true }
           } } }
         } } } } }, "429": { "description": "Rate limit per-IP (60/60s)" } } }
+    },
+    "/integrazioni/logo/{id}": {
+      "get": {
+        "summary": "Logo di un'integrazione approvata",
+        "description": "Serve il logo caricato dal partner (P28), SOLO per candidature con status 'approved' — 404 altrimenti. URL riportato in logo_url da GET /api/integrations.",
+        "parameters": [ { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "pattern": "^int_[0-9a-f]{8}$" } } ],
+        "responses": {
+          "200": { "description": "Immagine (PNG/JPEG/WebP)", "content": { "image/png": {}, "image/jpeg": {}, "image/webp": {} } },
+          "404": { "description": "Non trovato (id inesistente, non approvato, o servizio non disponibile)" }
+        }
+      }
     },
     "/c/{hash}": {
       "get": {
