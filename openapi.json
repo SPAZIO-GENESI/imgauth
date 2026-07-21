@@ -2,7 +2,7 @@
   "openapi": "3.0.3",
   "info": {
     "title": "imgauth — API di attestazione opere digitali",
-    "version": "1.29.0",
+    "version": "1.30.0",
     "description": "Motore di attestazione Spazio Genesi ETS. Full privacy: l'impronta SHA-256 si calcola sul client, il file non viene mai inviato al server. Contratto reale in italiano (non tradurre i nomi campo). Vedi https://attestazione.spaziogenesi.org per l'interfaccia utente e https://github.com/SPAZIO-GENESI/imgauth per il codice sorgente (AGPL-3.0).",
     "contact": { "name": "Spazio Genesi ETS", "url": "https://spaziogenesi.org" },
     "license": { "name": "AGPL-3.0-only", "url": "https://github.com/SPAZIO-GENESI/imgauth/blob/main/LICENSE" }
@@ -177,8 +177,26 @@
       }
     },
     "/api/status-history": {
-      "get": { "summary": "Storico 90 giorni per componente", "description": "Rollup giornaliero per la pagina /status/. CORS aperto.",
-        "responses": { "200": { "description": "Storico", "content": { "application/json": { "schema": { "type": "object" } } } } } }
+      "get": { "summary": "Storico 90 giorni per componente", "description": "Rollup giornaliero per la pagina /status/. Ogni giorno riporta lo stato peggiore ('s') e, per i giorni registrati a fasce di 30 minuti (dal rilascio 1.30.0), il conteggio delle 48 fasce ('b') da cui si ricava la durata reale del disservizio. L'uptime è pesato sul tempo, non binario per-giorno. CORS aperto.",
+        "responses": { "200": { "description": "Storico", "content": { "application/json": { "schema": { "type": "object", "properties": {
+          "updated": { "type": "string", "format": "date-time", "nullable": true },
+          "window_days": { "type": "integer", "example": 90 },
+          "overall": { "type": "string", "enum": ["ok", "degraded", "down", "nodata"] },
+          "components": { "type": "array", "items": { "type": "object", "properties": {
+            "key": { "type": "string", "enum": ["worker", "signer", "archive", "anchor"] },
+            "label": { "type": "string" },
+            "current": { "type": "string", "enum": ["ok", "degraded", "down", "nodata"] },
+            "uptime": { "type": "number", "nullable": true, "description": "Percentuale pesata sul tempo (fasce ok / fasce con dati sull'intera finestra)", "example": 99.9 },
+            "days": { "type": "array", "items": { "type": "object", "properties": {
+              "d": { "type": "string", "format": "date" },
+              "s": { "type": "string", "enum": ["ok", "degraded", "down", "nodata"], "description": "Stato peggiore del giorno" },
+              "b": { "type": "object", "description": "Conteggio delle fasce da 30 minuti. Assente sui giorni registrati prima del rilascio 1.30.0 e sui giorni senza dati: in quel caso la barra resta piena, derivata da 's'.", "properties": {
+                "ok": { "type": "integer" }, "degraded": { "type": "integer" }, "down": { "type": "integer" },
+                "n": { "type": "integer", "description": "Fasce con dati (ok+degraded+down), max 48" }
+              } }
+            }, "required": ["d", "s"] } }
+          } } }
+        } } } } } } }
     },
     "/api/health-log": {
       "get": { "summary": "Eventi fini di salute per un giorno", "description": "Errori, degradi, rallentamenti sotto soglia. CORS aperto.",
