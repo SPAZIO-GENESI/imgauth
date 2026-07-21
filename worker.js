@@ -4449,13 +4449,32 @@ async function handleStatus(env, ctx) {
 }
 
 // ── Storico stato (per la pagina /status, barre a 90 giorni) ──────────────────
-// Rollup GIORNALIERO per componente in R2 (status/history.json): per ogni giorno
-// si conserva lo stato PEGGIORE osservato. Alimentato dal cron del Worker (anche
-// senza visitatori) e dai refresh di /api/status. Finestra a scorrimento 90 giorni.
+// Rollup GIORNALIERO per componente in R2 (status/history.json): il valore di
+// ogni giorno è una MAPPA A 48 FASCE da 30 min ciascuna (la cadenza del cron),
+// una stringa di 48 caratteri (uno stato-carattere per fascia, vedi CH sotto) —
+// non più una singola stringa-stato "peggiore del giorno". Alimentato dal cron
+// del Worker (anche senza visitatori) e dai refresh di /api/status. Finestra a
+// scorrimento 90 giorni. Giorni scritti PRIMA di P36-B restano nel vecchio
+// formato (stringa breve "ok"/"down"/"degraded", ≤8 char): non vengono
+// migrati all'indietro (nessun backfill, vedi P36 §7), solo distinti per
+// lunghezza da chi legge (handleStatusHistory).
 const HISTORY_KEY = "status/history.json";
 const HISTORY_DAYS = 90;
 const HIST_COMPONENTS = ["worker", "signer", "archive", "anchor"];
 const SEV = { nodata: 0, ok: 1, degraded: 2, down: 3 };
+// Mappa a fasce (P36-B): 48 fasce da 30 min/giorno, risoluzione onesta = cadenza
+// del cron (crons = ["*/30 * * * *"]). Una stringa (non contatori) rende la
+// scrittura un `max` per fascia idempotente sotto le read-modify-write
+// concorrenti su R2 di più isolate (nessuna transazione nativa).
+const BUCKETS = 48;
+const CH = { nodata: "-", ok: "o", degraded: "g", down: "x" };
+const CH_SEV = { "-": 0, o: 1, g: 2, x: 3 };
+// Indice di fascia (0-47) dell'istante `now`, ancorato alla mezzanotte di ROMA
+// (non UTC): coerente con dayRome/romeMidnight già usati per barre ed health-log.
+function bucketIndex(now = Date.now()) {
+  const mid = romeMidnight(dayRome(now));
+  return Math.min(BUCKETS - 1, Math.max(0, Math.floor((now - mid) / (30 * 60 * 1000))));
+}
 // I giorni dello storico (barre /status) e del log sono ancorati al fuso italiano
 // (Europe/Rome), NON a UTC: così barre ed eventi cadono nel giorno "giusto", in
 // particolare appena dopo la mezzanotte (Roma è UTC+1/+2). Il `ts` resta epoch assoluto.
@@ -4489,13 +4508,20 @@ async function recordHistory(env, s) {
   let hist = {};
   try { const o = await env.PDF_ARCHIVE.get(HISTORY_KEY); if (o) hist = JSON.parse(await o.text()) || {}; } catch {}
   let changed = false;
+  const idx = bucketIndex();
   for (const k of HIST_COMPONENTS) {
     const v = (s[k] === "ok" || s[k] === "down" || s[k] === "degraded") ? s[k] : "nodata";
     if (v === "nodata") continue;
     hist[k] = hist[k] || {};
-    const prev = hist[k][today] || "nodata";
-    const next = SEV[v] > SEV[prev] ? v : prev;
-    if (next !== prev) { hist[k][today] = next; changed = true; }
+    // Migrazione soft: un valore assente o in vecchio formato (stringa-stato
+    // corta, pre-P36-B) diventa una mappa nuova a 48 fasce, tutte "nodata".
+    // I giorni PASSATI in vecchio formato restano intatti (nessun backfill).
+    let map = hist[k][today];
+    if (typeof map !== "string" || map.length !== BUCKETS) map = CH.nodata.repeat(BUCKETS);
+    const cur = map[idx];
+    const nx = CH[v];
+    if (CH_SEV[nx] > CH_SEV[cur]) map = map.slice(0, idx) + nx + map.slice(idx + 1);
+    if (map !== hist[k][today]) { hist[k][today] = map; changed = true; }
   }
   // Potatura oltre i 90 giorni (confronto lessicografico su YYYY-MM-DD)
   const cutoff = dayRome(Date.now() - HISTORY_DAYS * 86400000);
