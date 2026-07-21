@@ -4540,6 +4540,31 @@ async function recordHistory(env, s) {
   }
 }
 
+// Deriva {s, b?} per un giorno dal valore grezzo salvato in R2: mappa a 48
+// fasce (nuovo formato, P36-B) o stringa-stato breve (vecchio formato,
+// pre-P36-B, ≤8 char). `b` è presente SOLO per il nuovo formato (contratto
+// additivo, vedi P36 §4): chi legge solo `s` non nota differenza.
+function dayBucketState(v) {
+  if (!v) return { s: "nodata" };
+  if (typeof v === "string" && v.length === BUCKETS) {
+    let ok = 0, degraded = 0, down = 0, n = 0, worst = CH.nodata;
+    for (let i = 0; i < BUCKETS; i++) {
+      const c = v[i];
+      if (c === CH.nodata) continue;
+      n++;
+      if (c === CH.ok) ok++;
+      else if (c === CH.degraded) degraded++;
+      else if (c === CH.down) down++;
+      if (CH_SEV[c] > CH_SEV[worst]) worst = c;
+    }
+    if (n === 0) return { s: "nodata" };
+    const sMap = { [CH.ok]: "ok", [CH.degraded]: "degraded", [CH.down]: "down" };
+    return { s: sMap[worst], b: { ok, degraded, down, n } };
+  }
+  if (v === "ok" || v === "down" || v === "degraded") return { s: v };
+  return { s: "nodata" };
+}
+
 async function handleStatusHistory(env, ctx) {
   // Auto-guarigione: se lo storico è vecchio (>10 min), campiona in background.
   // Così la pagina /status resta fresca anche indipendentemente dal cron.
@@ -4569,10 +4594,25 @@ async function handleStatusHistory(env, ctx) {
 
   const components = HIST_COMPONENTS.map((k) => {
     const hk = hist[k] || {};
-    const arr = days.map((d) => ({ d, s: hk[d] || "nodata" }));
-    const withData = arr.filter((x) => x.s !== "nodata");
-    const ok = withData.filter((x) => x.s === "ok").length;
-    const uptime = withData.length ? Math.round((ok / withData.length) * 1000) / 10 : null;
+    const arr = days.map((d) => {
+      const entry = dayBucketState(hk[d]);
+      return entry.b ? { d, s: entry.s, b: entry.b } : { d, s: entry.s };
+    });
+    // Uptime pesato sul TEMPO (P36 §4), non più binario per-giorno: somma le
+    // fasce ok su tutte le fasce con dati. I giorni in vecchio formato contano
+    // come 48 fasce tutte nello stato peggiore del giorno (conservativo: è
+    // esattamente come apparivano nella UI prima di P36-B).
+    let sumOk = 0, sumN = 0;
+    for (const x of arr) {
+      if (x.b) {
+        sumOk += x.b.ok;
+        sumN += x.b.n;
+      } else if (x.s !== "nodata") {
+        sumN += BUCKETS;
+        if (x.s === "ok") sumOk += BUCKETS;
+      }
+    }
+    const uptime = sumN ? Math.round((sumOk / sumN) * 1000) / 10 : null;
     return { key: k, label: labels[k], current: arr[arr.length - 1].s, uptime, days: arr };
   });
 
