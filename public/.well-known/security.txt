@@ -1,0 +1,8 @@
+# Spazio Genesi ETS — Attestazione delle opere digitali
+# Politica completa / full policy: https://attestazione.spaziogenesi.org/sicurezza/
+
+Contact: mailto:it@spaziogenesi.org
+Expires: 2027-07-21T00:00:00.000Z
+Preferred-Languages: it, en
+Canonical: https://imgauth.spaziogenesi.org/.well-known/security.txt
+Policy: https://attestazione.spaziogenesi.org/sicurezza/
