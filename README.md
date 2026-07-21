@@ -65,6 +65,13 @@ Contratto completo in formato OpenAPI 3.0: [`/openapi.json`](https://imgauth.spa
 [`/docs`](https://attestazione.spaziogenesi.org/docs/) per la stessa documentazione
 in una pagina leggibile — auto-ospitata, nessuna dipendenza di terze parti.
 
+## Sicurezza
+
+Segnalazioni di vulnerabilità → [`/sicurezza/`](https://attestazione.spaziogenesi.org/sicurezza/)
+(policy di responsible disclosure, safe harbor per la ricerca in buona fede);
+`security.txt` conforme RFC 9116 su
+[`/.well-known/security.txt`](https://imgauth.spaziogenesi.org/.well-known/security.txt).
+
 ## Licenza
 
 Copyright (C) 2026 Spazio Genesi ETS.
