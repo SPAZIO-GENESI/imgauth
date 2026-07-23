@@ -2,7 +2,7 @@
   "openapi": "3.0.3",
   "info": {
     "title": "imgauth — API di attestazione opere digitali",
-    "version": "1.31.0",
+    "version": "1.32.0",
     "description": "Motore di attestazione Spazio Genesi ETS. Full privacy: l'impronta SHA-256 si calcola sul client, il file non viene mai inviato al server. Contratto reale in italiano (non tradurre i nomi campo). Vedi https://attestazione.spaziogenesi.org per l'interfaccia utente e https://github.com/SPAZIO-GENESI/imgauth per il codice sorgente (AGPL-3.0).",
     "contact": { "name": "Spazio Genesi ETS", "url": "https://spaziogenesi.org" },
     "license": { "name": "AGPL-3.0-only", "url": "https://github.com/SPAZIO-GENESI/imgauth/blob/main/LICENSE" }

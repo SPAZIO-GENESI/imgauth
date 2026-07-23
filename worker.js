@@ -1462,7 +1462,13 @@ function adminPageHtml() {
 </head>
 <body>
 <div class="wrap">
-  <h1>Admin credenziali agente <span style="color:var(--muted);font-weight:400;font-size:.9rem;">— Spazio Genesi</span></h1>
+  <div style="display:flex;align-items:center;gap:.5rem;margin-bottom:1.1rem;">
+    <svg viewBox="0 0 700 700" width="24" height="24" aria-hidden="true" style="flex:0 0 auto;display:block;"><path fill="#8B6914" d="M0,0 L700,0 L700,196.81 L597.87,196.81 L597.87,102.13 L102.13,102.13 L102.13,597.87 L597.87,597.87 L597.87,503.19 L700,503.19 L700,700 L0,700 Z"/><circle fill="#1f1d18" cx="350" cy="350" r="153.19"/><rect fill="#1f1d18" x="490.53" y="291.49" width="209.44" height="117.03"/></svg>
+    <b style="font-size:1rem;color:var(--ink);">Attestazione</b>
+    <span style="color:var(--muted);font-size:.8rem;">· Amministrazione</span>
+    <a href="https://spaziogenesi.org/" title="Spazio Genesi — l'ente dietro il servizio" style="margin-left:auto;display:inline-flex;align-items:center;gap:.3rem;font-size:.72rem;color:var(--muted);text-decoration:none;"><svg viewBox="0 0 580 481" width="13" aria-hidden="true" style="display:block;"><g transform="translate(0,481) scale(0.1,-0.1)" fill="currentColor" stroke="none"><path d="M2175 4799 c-729 -75 -1378 -467 -1780 -1074 -82 -124 -203 -366 -252 -505 -100 -282 -137 -506 -137 -815 0 -222 6 -283 46 -497 l23 -118 1396 0 1397 0 26 -83 c37 -117 49 -216 43 -332 -24 -405 -299 -739 -698 -847 -120 -32 -328 -32 -448 0 -105 29 -210 76 -301 138 -77 51 -201 176 -240 242 l-25 41 -368 1 -368 0 63 -76 c142 -172 345 -355 533 -479 124 -82 366 -203 505 -252 281 -100 505 -137 815 -137 310 0 534 37 815 137 139 49 381 170 505 252 265 175 514 425 690 690 94 141 214 391 269 558 l49 147 534 0 533 0 0 565 0 565 -1944 0 -1943 0 -27 59 c-53 119 -70 203 -70 361 0 168 18 251 84 388 51 106 88 161 169 246 83 86 166 145 275 197 142 66 218 82 391 82 122 0 165 -4 228 -21 99 -27 232 -89 310 -146 74 -52 190 -172 232 -238 l30 -48 413 0 c226 0 412 2 412 5 0 14 -172 214 -256 299 -190 190 -374 323 -619 447 -232 117 -479 196 -735 234 -127 19 -452 27 -575 14z"/></g></svg>un servizio di Spazio Genesi</a>
+  </div>
+  <h1>Admin credenziali agente</h1>
 
   <div class="card" id="loginCard">
     <label for="secretInput">Admin secret</label>
@@ -3989,9 +3995,15 @@ ${headExtra}
   .wrap { max-width:640px; margin:1.5rem auto; }
   .card { background:var(--card); border:1px solid var(--line); border-radius:14px;
     padding:1.6rem 1.7rem; box-shadow:0 1px 3px rgba(0,0,0,.04); }
-  .brand { display:flex; align-items:center; gap:.55rem; font-size:.82rem;
-    letter-spacing:.04em; text-transform:uppercase; color:var(--muted); margin-bottom:1rem; }
-  .brand b { color:var(--oro); font-weight:700; letter-spacing:.02em; text-transform:none; font-size:.95rem; }
+  .brand { display:flex; align-items:center; gap:.5rem; margin-bottom:1rem; }
+  .brand-svc { display:inline-flex; align-items:center; gap:.5rem; text-decoration:none; color:inherit; }
+  .brand-logo { width:24px; height:24px; display:block; flex:0 0 auto; }
+  .brand b { color:var(--ink); font-weight:700; font-size:1rem; letter-spacing:.01em; }
+  .brand .parent { margin-left:auto; display:inline-flex; align-items:center; gap:.3rem;
+    font-size:.72rem; color:var(--muted); text-decoration:none; }
+  .brand .parent svg { width:13px; height:auto; display:block; }
+  .brand .parent:hover { color:var(--oro); }
+  .brand-svc:hover b { color:var(--oro); }
   h1 { font-size:1.45rem; margin:.2rem 0 1rem; }
   .lead { font-size:1.02rem; }
   .muted { color:var(--muted); font-size:.9rem; }
@@ -4019,8 +4031,11 @@ ${headExtra}
   <div class="wrap">
     <div class="card">
       <div class="brand">
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#8B6914" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-8 8.5-4.5-1-8-3.5-8-8.5V6l8-3 8 3z"/><path d="m9 12 2 2 4-4"/></svg>
-        <b>Spazio Genesi</b> · Attestazione opere
+        <a class="brand-svc" href="${CERT_PAGE_BASE}" aria-label="Attestazione — home del servizio">
+          <svg class="brand-logo" viewBox="0 0 700 700" aria-hidden="true"><path fill="#8B6914" d="M0,0 L700,0 L700,196.81 L597.87,196.81 L597.87,102.13 L102.13,102.13 L102.13,597.87 L597.87,597.87 L597.87,503.19 L700,503.19 L700,700 L0,700 Z"/><circle fill="#1f1d18" cx="350" cy="350" r="153.19"/><rect fill="#1f1d18" x="490.53" y="291.49" width="209.44" height="117.03"/></svg>
+          <b>Attestazione</b>
+        </a>
+        <a class="parent" href="https://spaziogenesi.org/" title="Spazio Genesi — l'ente dietro il servizio"><svg viewBox="0 0 580 481" aria-hidden="true"><g transform="translate(0,481) scale(0.1,-0.1)" fill="currentColor" stroke="none"><path d="M2175 4799 c-729 -75 -1378 -467 -1780 -1074 -82 -124 -203 -366 -252 -505 -100 -282 -137 -506 -137 -815 0 -222 6 -283 46 -497 l23 -118 1396 0 1397 0 26 -83 c37 -117 49 -216 43 -332 -24 -405 -299 -739 -698 -847 -120 -32 -328 -32 -448 0 -105 29 -210 76 -301 138 -77 51 -201 176 -240 242 l-25 41 -368 1 -368 0 63 -76 c142 -172 345 -355 533 -479 124 -82 366 -203 505 -252 281 -100 505 -137 815 -137 310 0 534 37 815 137 139 49 381 170 505 252 265 175 514 425 690 690 94 141 214 391 269 558 l49 147 534 0 533 0 0 565 0 565 -1944 0 -1943 0 -27 59 c-53 119 -70 203 -70 361 0 168 18 251 84 388 51 106 88 161 169 246 83 86 166 145 275 197 142 66 218 82 391 82 122 0 165 -4 228 -21 99 -27 232 -89 310 -146 74 -52 190 -172 232 -238 l30 -48 413 0 c226 0 412 2 412 5 0 14 -172 214 -256 299 -190 190 -374 323 -619 447 -232 117 -479 196 -735 234 -127 19 -452 27 -575 14z"/></g></svg>un servizio di Spazio Genesi</a>
       </div>
       ${bodyHtml}
       <div class="foot">
