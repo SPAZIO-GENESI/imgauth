@@ -64,7 +64,8 @@
             "autore": { "type": "string", "maxLength": 100 },
             "anno": { "type": "string", "maxLength": 50 },
             "note": { "type": "string", "maxLength": 300 },
-            "turnstile_token": { "type": "string", "description": "Richiesto se non c'è credenziale agente e TURNSTILE_SECRET è configurato" }
+            "turnstile_token": { "type": "string", "description": "Richiesto se non c'è credenziale agente e TURNSTILE_SECRET è configurato" },
+            "lang": { "type": "string", "enum": ["it", "en"], "description": "Lingua dei messaggi d'errore (P41). Facoltativo, default 'it'; in mancanza si legge Accept-Language. Non influisce sul contenuto attestato né sulla firma HMAC." }
           } } } }
         },
         "responses": {
@@ -108,7 +109,7 @@
     "/api/cert-pdf": {
       "post": {
         "summary": "Genera il certificato PDF firmato",
-        "description": "Riceve l'oggetto restituito da POST /api/hash (deve includere `attestazione` + `hmac`, verificati server-side prima di firmare). Chiama authart server-to-server per la firma crittografica; archivia copia in R2.",
+        "description": "Riceve l'oggetto restituito da POST /api/hash (deve includere `attestazione` + `hmac`, verificati server-side prima di firmare). Chiama authart server-to-server per la firma crittografica; archivia copia in R2. Campo facoltativo `lang` (it|en, P41) per i soli messaggi d'errore: non influisce sul contenuto del PDF (etichette sempre italiane) né sulla firma HMAC.",
         "security": [ { "agentBearer": [] }, { "voucherHeader": [] }, {} ],
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "description": "Oggetto completo restituito da POST /api/hash" } } } },
         "responses": {
@@ -227,7 +228,10 @@
       "get": {
         "summary": "Pagina pubblica \"certificato verificabile online\"",
         "description": "HTML server-rendered: impronta, data, ancoraggio, QR. 404 se l'opera non è in archivio.",
-        "parameters": [ { "name": "hash", "in": "path", "required": true, "schema": { "type": "string", "pattern": "^[0-9a-f]{64}$" } } ],
+        "parameters": [
+          { "name": "hash", "in": "path", "required": true, "schema": { "type": "string", "pattern": "^[0-9a-f]{64}$" } },
+          { "name": "lang", "in": "query", "required": false, "schema": { "type": "string", "enum": ["it", "en"] }, "description": "Lingua della pagina (P41). Default 'it'." }
+        ],
         "responses": { "200": { "description": "Pagina HTML", "content": { "text/html": {} } }, "404": { "description": "Non in archivio" } }
       }
     },
@@ -244,7 +248,10 @@
       "get": {
         "summary": "Pagina di autorizzazione device flow",
         "description": "HTML servita dal Worker con widget Turnstile: l'umano autorizza qui l'agente/MCP.",
-        "parameters": [ { "name": "code", "in": "query", "required": true, "schema": { "type": "string" } } ],
+        "parameters": [
+          { "name": "code", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "lang", "in": "query", "required": false, "schema": { "type": "string", "enum": ["it", "en"] }, "description": "Lingua della pagina (P41). Default 'it'." }
+        ],
         "responses": { "200": { "description": "Pagina HTML", "content": { "text/html": {} } }, "400": { "description": "codice non valido" }, "410": { "description": "richiesta scaduta" } }
       }
     },

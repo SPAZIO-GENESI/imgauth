@@ -6,9 +6,10 @@
 // al Worker (e authweb ha una propria cartella js/).
 (function () {
   Array.prototype.forEach.call(document.querySelectorAll("button.copy[data-hash]"), function (btn) {
+    var copiedLabel = btn.dataset.lang === "en" ? "copied" : "copiato";
     btn.addEventListener("click", function () {
       if (!navigator.clipboard) return;
-      navigator.clipboard.writeText(btn.dataset.hash).then(function () { btn.textContent = "copiato"; });
+      navigator.clipboard.writeText(btn.dataset.hash).then(function () { btn.textContent = copiedLabel; });
     });
   });
 })();

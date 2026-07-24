@@ -8,6 +8,9 @@
   var body = document.getElementById("agentBody");
   var CODE = body.dataset.code;
   var SITEKEY = body.dataset.sitekey;
+  var MSG = body.dataset.lang === "en"
+    ? { progress: "Authorizing…", failed: "Authorization failed. Please try again." }
+    : { progress: "Autorizzazione in corso…", failed: "Autorizzazione non riuscita. Riprova." };
   var tsToken = "";
   window.onloadTurnstileCallback = function () {
     if (!window.turnstile) return;
@@ -23,7 +26,7 @@
   document.getElementById("agentApproveBtn").addEventListener("click", async function () {
     var btn = this, msg = document.getElementById("agentMsg");
     btn.disabled = true;
-    msg.textContent = "Autorizzazione in corso…";
+    msg.textContent = MSG.progress;
     try {
       // URL ASSOLUTA, non relativa: questa pagina è servita su
       // attestazione.spaziogenesi.org via route Cloudflare /agent/*,
@@ -39,7 +42,7 @@
       if (!res.ok) throw new Error("http " + res.status);
       document.getElementById("agentBody").innerHTML = document.getElementById("agentSuccessTpl").innerHTML;
     } catch (e) {
-      msg.textContent = "Autorizzazione non riuscita. Riprova.";
+      msg.textContent = MSG.failed;
       btn.disabled = false;
       if (window.turnstile) window.turnstile.reset();
     }

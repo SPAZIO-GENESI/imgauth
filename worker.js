@@ -47,6 +47,34 @@ const MONTHS_IT = [
   "luglio", "agosto", "settembre", "ottobre", "novembre", "dicembre",
 ];
 
+const MONTHS_EN = [
+  "", "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+];
+
+// ── i18n MVP (P41) — pagine HTML del Worker e messaggi d'errore API ─────────
+// La lingua è SOLO una scelta di resa: non entra mai nel messaggio firmato
+// (hmacMessage) né altera alcun comportamento. Assente → "it", bit-identico
+// a prima di P41 (vedi CLAUDE.md § P41 D5).
+const SUPPORTED_LANGS = new Set(["it", "en"]);
+
+// Pagine HTML: /c/<hash>?lang=en, /agent/authorize?lang=en.
+function pickPageLang(url) {
+  const q = String(url.searchParams.get("lang") || "").toLowerCase();
+  return SUPPORTED_LANGS.has(q) ? q : "it";
+}
+
+// Risposte JSON di /api/hash e /api/cert-pdf: campo facoltativo "lang" nel
+// body (it|en, qualunque altro valore → it, fail-safe mai un errore),
+// altrimenti Accept-Language.
+function pickApiLang(bodyLang, request) {
+  const b = String(bodyLang ?? "").toLowerCase();
+  if (SUPPORTED_LANGS.has(b)) return b;
+  const accept = String(request?.headers?.get?.("Accept-Language") || "").toLowerCase();
+  if (accept.startsWith("en")) return "en";
+  return "it";
+}
+
 const ALLOWED_ORIGIN = "https://attestazione.spaziogenesi.org";
 
 // Origin CORS effettivo per la richiesta corrente (P24: multi-ambiente).
@@ -540,44 +568,82 @@ async function handleAgentAuthorize(env) {
 
 // GET /agent/authorize?code= — pagina servita dal Worker (stesso pattern di /c/*).
 async function handleAgentAuthorizePage(url, env) {
+  const lang = pickPageLang(url);
   const code = url.searchParams.get("code") || "";
   if (!AUTH_CODE_RE.test(code)) {
-    return htmlResponse(certPageShell("Codice non valido",
-      `<p class="lead">Il codice di autorizzazione non è valido o è incompleto.</p>`), 400);
+    return htmlResponse(certPageShell(
+      lang === "en" ? "Invalid code" : "Codice non valido",
+      lang === "en"
+        ? `<p class="lead">The authorization code is invalid or incomplete.</p>`
+        : `<p class="lead">Il codice di autorizzazione non è valido o è incompleto.</p>`,
+      "", lang), 400);
   }
   if (!env?.DB) {
-    return htmlResponse(certPageShell("Servizio non disponibile",
-      `<p class="lead">Il servizio di autorizzazione non è al momento raggiungibile. Riprova più tardi.</p>`), 503);
+    return htmlResponse(certPageShell(
+      lang === "en" ? "Service unavailable" : "Servizio non disponibile",
+      lang === "en"
+        ? `<p class="lead">The authorization service is temporarily unreachable. Please try again later.</p>`
+        : `<p class="lead">Il servizio di autorizzazione non è al momento raggiungibile. Riprova più tardi.</p>`,
+      "", lang), 503);
   }
 
   let row;
   try {
     row = await env.DB.prepare(`SELECT status, expires_at FROM agent_authorizations WHERE code = ?`).bind(code).first();
   } catch {
-    return htmlResponse(certPageShell("Errore", `<p class="lead">Errore interno. Riprova.</p>`), 500);
+    return htmlResponse(certPageShell(
+      lang === "en" ? "Error" : "Errore",
+      lang === "en" ? `<p class="lead">Internal error. Please try again.</p>` : `<p class="lead">Errore interno. Riprova.</p>`,
+      "", lang), 500);
   }
   if (!row || (Date.now() > row.expires_at && row.status !== "claimed")) {
-    return htmlResponse(certPageShell("Richiesta scaduta",
-      `<p class="lead">Questa richiesta di autorizzazione non è più valida. Torna all'app che l'ha generata e riprova da capo.</p>`), 410);
+    return htmlResponse(certPageShell(
+      lang === "en" ? "Request expired" : "Richiesta scaduta",
+      lang === "en"
+        ? `<p class="lead">This authorization request is no longer valid. Go back to the app that generated it and try again.</p>`
+        : `<p class="lead">Questa richiesta di autorizzazione non è più valida. Torna all'app che l'ha generata e riprova da capo.</p>`,
+      "", lang), 410);
   }
   if (row.status !== "pending") {
-    return htmlResponse(certPageShell("Autorizzato", agentAuthorizeSuccessBody()), 200);
+    return htmlResponse(certPageShell(
+      lang === "en" ? "Authorized" : "Autorizzato",
+      agentAuthorizeSuccessBody(lang), "", lang), 200);
   }
-  return htmlResponse(agentAuthorizePageHtml(code), 200);
+  return htmlResponse(agentAuthorizePageHtml(code, lang), 200);
 }
 
-function agentAuthorizeSuccessBody() {
-  return `<h1>Autorizzato ✓</h1>
+function agentAuthorizeSuccessBody(lang = "it") {
+  return lang === "en"
+    ? `<h1>Authorized ✓</h1>
+    <p class="lead">Done. Go back to the app or agent that opened this page: it will detect the authorization on its own within a few seconds.</p>
+    <p class="muted">You can close this tab.</p>`
+    : `<h1>Autorizzato ✓</h1>
     <p class="lead">Fatto. Torna all'app o all'agente che ha aperto questa pagina: rileverà l'autorizzazione da solo entro pochi secondi.</p>
     <p class="muted">Puoi chiudere questa scheda.</p>`;
 }
 
-function agentAuthorizePageHtml(code) {
+function agentAuthorizePageHtml(code, lang = "it") {
   // Niente JS inline: la CSP impostata all'edge (Transform Rule security-headers,
   // script-src senza 'unsafe-inline') vale anche per le pagine del Worker.
-  // Logica in /js/agent-authorize.js (Static Assets); code e sitekey viaggiano
-  // come data-attribute (code già validato con AUTH_CODE_RE dal chiamante).
-  const bodyHtml = `<div id="agentBody" data-code="${code}" data-sitekey="${AGENT_TURNSTILE_SITEKEY}">
+  // Logica in /js/agent-authorize.js (Static Assets); code, sitekey e lingua
+  // viaggiano come data-attribute (code già validato con AUTH_CODE_RE dal chiamante).
+  const en = lang === "en";
+  const langAttr = en ? ` data-lang="en"` : "";
+  const bodyHtml = en ? `<div id="agentBody" data-code="${code}" data-sitekey="${AGENT_TURNSTILE_SITEKEY}"${langAttr}>
+    <h1>Authorize an app to issue attestations</h1>
+    <p class="lead">An app or agent on your device is requesting permission to issue up to
+    <b>${SESSION_QUOTA} attestations</b> over the next <b>24 hours</b>, without solving an
+    anti-bot check for every attestation.</p>
+    <p class="muted">Only authorize if you started this request yourself, from an app or agent you trust.</p>
+    <div id="turnstileWidget" style="margin:1.2rem 0;"></div>
+    <p id="agentMsg" class="muted" role="status" aria-live="polite"></p>
+    <div class="actions">
+      <button id="agentApproveBtn" class="btn primary" type="button" disabled>Authorize</button>
+    </div>
+  </div>
+  <template id="agentSuccessTpl">${agentAuthorizeSuccessBody(lang)}</template>
+  <script src="${API_BASE}/js/agent-authorize.js"></script>
+  <script src="https://challenges.cloudflare.com/turnstile/v0/api.js?onload=onloadTurnstileCallback" async defer></script>` : `<div id="agentBody" data-code="${code}" data-sitekey="${AGENT_TURNSTILE_SITEKEY}">
     <h1>Autorizza un'app a emettere attestazioni</h1>
     <p class="lead">Un'app o un agente sul tuo dispositivo sta chiedendo di poter emettere fino a
     <b>${SESSION_QUOTA} attestazioni</b> nelle prossime <b>24 ore</b>, senza dover risolvere una
@@ -589,10 +655,10 @@ function agentAuthorizePageHtml(code) {
       <button id="agentApproveBtn" class="btn primary" type="button" disabled>Autorizza</button>
     </div>
   </div>
-  <template id="agentSuccessTpl">${agentAuthorizeSuccessBody()}</template>
+  <template id="agentSuccessTpl">${agentAuthorizeSuccessBody(lang)}</template>
   <script src="${API_BASE}/js/agent-authorize.js"></script>
   <script src="https://challenges.cloudflare.com/turnstile/v0/api.js?onload=onloadTurnstileCallback" async defer></script>`;
-  return certPageShell("Autorizza un'app", bodyHtml);
+  return certPageShell(en ? "Authorize an app" : "Autorizza un'app", bodyHtml, "", lang);
 }
 
 // POST /api/agent/approve {code, turnstile_token} — genera il session token.
@@ -1780,9 +1846,9 @@ export default {
       // attestazione.spaziogenesi.org/c/* invariata, serve la pagina come
       // sempre — QR e certificati stampano già quell'URL).
       if (url.hostname !== "attestazione.spaziogenesi.org") {
-        return permanentRedirect(`${CERT_PAGE_BASE}${path}`);
+        return permanentRedirect(`${CERT_PAGE_BASE}${path}${url.search}`);
       }
-      return handleCertPage(path, env);
+      return handleCertPage(url, env);
     }
     if (method === "POST" && path === "/api/agent/authorize") return handleAgentAuthorize(env);
     if (method === "POST" && path === "/api/agent/approve")   return handleAgentApprove(request, env, ctx);
@@ -1884,15 +1950,20 @@ function handlePing(request) {
 // ── /api/hash ────────────────────────────────────────────────────────────────
 
 async function handleHash(request, env, ctx) {
+  // Lingua per i messaggi d'errore (P41 F3): campo facoltativo "lang" nel
+  // body, altrimenti Accept-Language. Fail-safe a "it" se il JSON stesso
+  // non fosse leggibile — mai usata per la firma HMAC (vedi hmacMessage/meta).
+  let lang = "it";
   try {
     const data       = await request.json();
+    lang = pickApiLang(data.lang, request);
     const b64        = data.image;   // percorso legacy: file inline (pre-1.15.0)
     const clientHash = data.sha256;  // percorso primario: impronta calcolata sul client
     const name       = data.name  ?? "opera";
     const mime       = data.type  ?? "application/octet-stream";
 
     if (!b64 && !clientHash) {
-      return jsonResponse({ error: "Campo 'sha256' (o 'image') mancante." }, 400);
+      return jsonResponse({ error: lang === "en" ? "Missing 'sha256' (or 'image') field." : "Campo 'sha256' (o 'image') mancante." }, 400);
     }
 
     // Pre-check economico del formato (percorso client): un hash malformato non
@@ -1900,7 +1971,7 @@ async function handleHash(request, env, ctx) {
     // il ricalcolo pieno più sotto resta invariato. Il percorso legacy (`image`)
     // non è toccato: il decode+hash costoso resta dopo Turnstile, come prima.
     if (!b64 && !HEX64.test(String(clientHash).trim())) {
-      return jsonResponse({ error: "Campo 'sha256' malformato (attesi 64 caratteri esadecimali)." }, 400);
+      return jsonResponse({ error: lang === "en" ? "Malformed 'sha256' field (expected 64 hexadecimal characters)." : "Campo 'sha256' malformato (attesi 64 caratteri esadecimali)." }, 400);
     }
 
     // ── Autenticazione agenti (bearer, opzionale — vedi P21) ────────────────
@@ -1944,7 +2015,7 @@ async function handleHash(request, env, ctx) {
     if (!agentAuth && !voucherAuth && env?.TURNSTILE_SECRET) {
       const tsToken = String(data.turnstile_token ?? "");
       if (!tsToken) {
-        return jsonResponse({ error: "Verifica anti-bot mancante." }, 400);
+        return jsonResponse({ error: lang === "en" ? "Missing anti-bot verification." : "Verifica anti-bot mancante." }, 400);
       }
       let human;
       try {
@@ -1953,7 +2024,7 @@ async function handleHash(request, env, ctx) {
         human = true; // siteverify irraggiungibile → non bloccare il servizio primario
       }
       if (!human) {
-        return jsonResponse({ error: "Verifica anti-bot non superata. Riprova." }, 403);
+        return jsonResponse({ error: lang === "en" ? "Anti-bot verification failed. Please try again." : "Verifica anti-bot non superata. Riprova." }, 403);
       }
     }
 
@@ -1963,13 +2034,13 @@ async function handleHash(request, env, ctx) {
       // Tetto di dimensione (difesa DoS/memoria): scarta payload oltre il limite
       // prima ancora di decodificarlo. base64 ≈ 4/3 dei byte grezzi.
       if (typeof b64 !== "string" || b64.length > Math.ceil(MAX_BYTES / 3) * 4 + 64) {
-        return jsonResponse({ error: "File troppo grande (max 100 MB)." }, 413);
+        return jsonResponse({ error: lang === "en" ? "File too large (max 100 MB)." : "File troppo grande (max 100 MB)." }, 413);
       }
 
       // Decodifica base64 → ArrayBuffer
       const raw = base64ToBytes(b64);
       if (raw.byteLength > MAX_BYTES) {
-        return jsonResponse({ error: "File troppo grande (max 100 MB)." }, 413);
+        return jsonResponse({ error: lang === "en" ? "File too large (max 100 MB)." : "File troppo grande (max 100 MB)." }, 413);
       }
 
       const hashBuf = await crypto.subtle.digest("SHA-256", raw);
@@ -1986,7 +2057,7 @@ async function handleHash(request, env, ctx) {
       // mentre dimensione e MIME erano già campi descrittivi non vincolati.
       digest = String(clientHash).trim().toLowerCase();
       if (!HEX64.test(digest)) {
-        return jsonResponse({ error: "Campo 'sha256' malformato (attesi 64 caratteri esadecimali)." }, 400);
+        return jsonResponse({ error: lang === "en" ? "Malformed 'sha256' field (expected 64 hexadecimal characters)." : "Campo 'sha256' malformato (attesi 64 caratteri esadecimali)." }, 400);
       }
       const declaredSize = Number(data.size);
       size = Number.isFinite(declaredSize) && declaredSize >= 0 ? Math.floor(declaredSize) : null;
@@ -2099,7 +2170,7 @@ async function handleHash(request, env, ctx) {
       convenzione:         convenzioneInfo,
     });
   } catch {
-    return jsonResponse({ error: "Errore interno del server." }, 500);
+    return jsonResponse({ error: lang === "en" ? "Internal server error." : "Errore interno del server." }, 500);
   }
 }
 
@@ -2352,8 +2423,15 @@ async function peekVoucherConvention(request, env) {
 }
 
 async function handlePdf(request, env, ctx) {
+  // Lingua per i messaggi d'errore (P41 F3): campo facoltativo "lang" nel
+  // body, altrimenti Accept-Language. NON usata per il rendering del PDF
+  // (le etichette del certificato restano italiane — vedi F4) né entra mai
+  // nella firma HMAC (extractMeta/hmacMessage leggono solo titolo/autore/
+  // anno/note).
+  let lang = "it";
   try {
     const d = await request.json();
+    lang = pickApiLang(d.lang, request);
 
     // ── Autenticità del contenuto ────────────────────────────────────────────
     // Il certificato può essere emesso SOLO a partire da un'attestazione
@@ -2362,7 +2440,7 @@ async function handlePdf(request, env, ctx) {
     // potrebbe far firmare crittograficamente contenuti arbitrari (hash falsi,
     // date retrodatate), svuotando di valore probatorio l'intero servizio.
     if (!env?.HMAC_SECRET) {
-      return jsonResponse({ error: "Servizio non configurato per l'emissione di certificati." }, 503);
+      return jsonResponse({ error: lang === "en" ? "Service not configured for certificate issuance." : "Servizio non configurato per l'emissione di certificati." }, 503);
     }
     const sha256 = String(d.sha256 ?? "");
     const tsIso  = String(d.timestamp_iso ?? "");
@@ -2370,20 +2448,20 @@ async function handlePdf(request, env, ctx) {
     const hmac   = String(d.hmac ?? "");
 
     if (!HEX64.test(sha256) || !ISO_TS.test(tsIso) || !attest || !hmac) {
-      return jsonResponse({ error: "Attestazione incompleta o malformata." }, 400);
+      return jsonResponse({ error: lang === "en" ? "Incomplete or malformed attestation." : "Attestazione incompleta o malformata." }, 400);
     }
     // L'attestazione firmata deve corrispondere ESATTAMENTE ai campi hash e
     // timestamp che finiranno stampati sul certificato: così il token non può
     // essere riusato con un hash o una data diversi da quelli che ha autenticato.
     if (attest !== `SHA-256:${sha256}@${tsIso}`) {
-      return jsonResponse({ error: "Attestazione non coerente con hash e timestamp." }, 400);
+      return jsonResponse({ error: lang === "en" ? "Attestation inconsistent with hash and timestamp." : "Attestazione non coerente con hash e timestamp." }, 400);
     }
     // I metadati dichiarati entrano nel messaggio firmato: un titolo o un autore
     // diversi da quelli autenticati da /api/hash invalidano la firma → 403.
     const meta = extractMeta(d);
     const tokenOk = await verifyHmac(env.HMAC_SECRET, hmacMessage(attest, meta), hmac);
     if (!tokenOk) {
-      return jsonResponse({ error: "Firma dell'attestazione non valida: certificato non emettibile." }, 403);
+      return jsonResponse({ error: lang === "en" ? "Invalid attestation signature: certificate cannot be issued." : "Firma dell'attestazione non valida: certificato non emettibile." }, 403);
     }
     // Anti-bot: la challenge Turnstile è a monte, su /api/hash. Qui il token HMAC
     // garantisce già che l'attestazione provenga da una sessione umana verificata;
@@ -2420,7 +2498,9 @@ async function handlePdf(request, env, ctx) {
         const msg = signRes ? await signRes.text().catch(() => String(signRes.status)) : "nessuna risposta (timeout o connessione rifiutata)";
         console.error("[signer error]", signRes ? signRes.status : "no-response", msg.slice(0, 500));
         return jsonResponse({
-          error: "Firma del certificato temporaneamente non disponibile (aggiornamento della piattaforma in corso). Riprova tra qualche minuto.",
+          error: lang === "en"
+            ? "Certificate signing temporarily unavailable (platform update in progress). Please try again in a few minutes."
+            : "Firma del certificato temporaneamente non disponibile (aggiornamento della piattaforma in corso). Riprova tra qualche minuto.",
         }, 503);
       }
       finalBytes = new Uint8Array(await signRes.arrayBuffer());
@@ -2486,7 +2566,7 @@ async function handlePdf(request, env, ctx) {
 
     return pdfResponse(finalBytes);
   } catch {
-    return jsonResponse({ error: "Errore interno durante la generazione del certificato." }, 500);
+    return jsonResponse({ error: lang === "en" ? "Internal error while generating the certificate." : "Errore interno durante la generazione del certificato." }, 500);
   }
 }
 
@@ -3921,6 +4001,16 @@ function formatDateIT(iso) {
   return `${dt.getUTCDate()} ${MONTHS_IT[dt.getUTCMonth() + 1]} ${dt.getUTCFullYear()}, ore ${hh}:${mm} UTC`;
 }
 
+// Come formatDateIT, ma in inglese — usata dalla pagina /c/<hash>?lang=en
+// (P41). formatDateIT resta invariata: è ancora il default "it".
+function formatDateEN(iso) {
+  const dt = new Date(iso);
+  if (isNaN(dt.getTime())) return "";
+  const hh = String(dt.getUTCHours()).padStart(2, "0");
+  const mm = String(dt.getUTCMinutes()).padStart(2, "0");
+  return `${MONTHS_EN[dt.getUTCMonth() + 1]} ${dt.getUTCDate()}, ${dt.getUTCFullYear()}, ${hh}:${mm} UTC`;
+}
+
 // QR come SVG vettoriale (nessuna dipendenza esterna): codifica l'URL passato.
 function qrSvg(text, px = 188) {
   const qr = encodeQR(text, { ecc: "M" });
@@ -3944,15 +4034,25 @@ function htmlResponse(html, status = 200) {
   });
 }
 
-async function handleCertPage(path, env) {
+async function handleCertPage(url, env) {
+  const path = url.pathname;
+  const lang = pickPageLang(url);
   const hash = decodeURIComponent(path.slice(3).split("/")[0] || "").toLowerCase();
   if (!HEX64.test(hash)) {
-    return htmlResponse(certPageShell("Impronta non valida",
-      `<p class="lead">L'indirizzo non contiene un'impronta SHA-256 valida (64 caratteri esadecimali).</p>`), 404);
+    return htmlResponse(certPageShell(
+      lang === "en" ? "Invalid fingerprint" : "Impronta non valida",
+      lang === "en"
+        ? `<p class="lead">The address does not contain a valid SHA-256 fingerprint (64 hexadecimal characters).</p>`
+        : `<p class="lead">L'indirizzo non contiene un'impronta SHA-256 valida (64 caratteri esadecimali).</p>`,
+      "", lang), 404);
   }
   if (!env?.PDF_ARCHIVE) {
-    return htmlResponse(certPageShell("Servizio non disponibile",
-      `<p class="lead">L'archivio dei certificati non è al momento raggiungibile. Riprova più tardi.</p>`), 503);
+    return htmlResponse(certPageShell(
+      lang === "en" ? "Service unavailable" : "Servizio non disponibile",
+      lang === "en"
+        ? `<p class="lead">The certificate archive is temporarily unreachable. Please try again later.</p>`
+        : `<p class="lead">L'archivio dei certificati non è al momento raggiungibile. Riprova più tardi.</p>`,
+      "", lang), 503);
   }
 
   let hasCert = false, hasOts = false, metaObj = null, certIso = "";
@@ -3967,19 +4067,28 @@ async function handleCertPage(path, env) {
   } catch { /* fall through: trattato come non trovato */ }
 
   if (!hasCert && !hasOts) {
-    return htmlResponse(certPageShell("Attestazione non trovata",
-      `<p class="lead">Nessuna attestazione risulta in archivio per questa impronta.</p>
+    return htmlResponse(certPageShell(
+      lang === "en" ? "Attestation not found" : "Attestazione non trovata",
+      lang === "en"
+        ? `<p class="lead">No attestation is on record for this fingerprint.</p>
+       <p class="muted">If you just issued the certificate, wait a moment and reload. To attest a new work, go to <a href="${CERT_PAGE_BASE}">attestazione.spaziogenesi.org</a>.</p>
+       <p class="fingerprint">${escHtml(hash)}</p>`
+        : `<p class="lead">Nessuna attestazione risulta in archivio per questa impronta.</p>
        <p class="muted">Se hai appena emesso il certificato, attendi qualche istante e ricarica. Per attestare una nuova opera vai su <a href="${CERT_PAGE_BASE}">attestazione.spaziogenesi.org</a>.</p>
-       <p class="fingerprint">${escHtml(hash)}</p>`), 404);
+       <p class="fingerprint">${escHtml(hash)}</p>`,
+      "", lang), 404);
   }
 
-  return htmlResponse(certPageHtml(hash, metaObj, certIso, hasCert, hasOts), 200);
+  return htmlResponse(certPageHtml(hash, metaObj, certIso, hasCert, hasOts, lang), 200);
 }
 
 // Guscio HTML comune (stessa identità visiva per pagina valida e stati d'errore).
-function certPageShell(title, bodyHtml, headExtra = "") {
+// `lang` (P41, MVP): "it" di default — bit-identico a prima quando il
+// chiamante non lo passa (i call site fuori dal perimetro P41, es. le pagine
+// d'errore del voucher OAuth, restano invariati).
+function certPageShell(title, bodyHtml, headExtra = "", lang = "it") {
   return `<!doctype html>
-<html lang="it">
+<html lang="${lang}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -4040,7 +4149,9 @@ ${headExtra}
       ${bodyHtml}
       <div class="foot">
         Spazio Genesi ETS — Codice fiscale 96602450585 — <a href="${CERT_PAGE_BASE}">attestazione.spaziogenesi.org</a><br>
-        L'attestazione prova l'esistenza e l'integrità del file a una certa data; non costituisce di per sé prova di paternità dell'opera.
+        ${lang === "en"
+          ? "This attestation proves the existence and integrity of the file at a given date; it does not, by itself, prove authorship of the work."
+          : "L'attestazione prova l'esistenza e l'integrità del file a una certa data; non costituisce di per sé prova di paternità dell'opera."}
       </div>
     </div>
   </div>
@@ -4048,39 +4159,88 @@ ${headExtra}
 </html>`;
 }
 
-function certPageHtml(hash, m, certIso, hasCert, hasOts) {
-  const permaUrl = `${CERT_PAGE_BASE}/c/${hash}`;
+function certPageHtml(hash, m, certIso, hasCert, hasOts, lang = "it") {
+  const en = lang === "en";
+  const permaUrl = `${CERT_PAGE_BASE}/c/${hash}${en ? "?lang=en" : ""}`;
   const dateIso  = (m && m.timestamp_iso) || certIso || "";
-  const dateText = (m && m.timestamp_leggibile) || formatDateIT(dateIso) || "data non disponibile";
+  // it: comportamento INVARIATO (bit-identico senza ?lang) — priorità a
+  // timestamp_leggibile, la stringa già scritta nel sidecar all'emissione.
+  // en: quella stringa è fissata in italiano all'emissione, quindi per
+  // l'inglese si ricalcola sempre dall'ISO con formatDateEN.
+  const dateText = en
+    ? (formatDateEN(dateIso) || "date not available")
+    : ((m && m.timestamp_leggibile) || formatDateIT(dateIso) || "data non disponibile");
   const otsUrl   = `${API_BASE}/api/ots?hash=${hash}`;
   const certUrl  = `${API_BASE}/api/cert?hash=${hash}`;
   const verifyUrl = `${CERT_PAGE_BASE}?hash=${hash}`;
 
   // Riga dati dichiarati (solo se presenti): sono auto-dichiarazioni vincolate alla firma.
+  const declaredLabels = en
+    ? { titolo: "Title", autore: "Author", anno: "Year/version", note: "Notes" }
+    : { titolo: "Titolo", autore: "Autore", anno: "Anno/versione", note: "Note" };
   const declared = [];
-  if (m?.titolo) declared.push(["Titolo", m.titolo]);
-  if (m?.autore) declared.push(["Autore", m.autore]);
-  if (m?.anno)   declared.push(["Anno/versione", m.anno]);
-  if (m?.note)   declared.push(["Note", m.note]);
+  if (m?.titolo) declared.push([declaredLabels.titolo, m.titolo]);
+  if (m?.autore) declared.push([declaredLabels.autore, m.autore]);
+  if (m?.anno)   declared.push([declaredLabels.anno, m.anno]);
+  if (m?.note)   declared.push([declaredLabels.note, m.note]);
   const declaredRows = declared
     .map(([k, v]) => `<div class="row"><span class="k">${escHtml(k)}</span><span class="v">${escHtml(v)}</span></div>`)
     .join("");
 
-  const otsRow = hasOts
-    ? `<div class="row"><span class="k">Ancoraggio Bitcoin</span><span class="v">OpenTimestamps · <a href="${otsUrl}">scarica prova .ots</a> · <a href="https://opentimestamps.org" target="_blank" rel="noopener">verifica</a></span></div>`
-    : `<div class="row"><span class="k">Ancoraggio Bitcoin</span><span class="v muted">non disponibile per questa impronta</span></div>`;
+  const otsRow = en
+    ? (hasOts
+        ? `<div class="row"><span class="k">Bitcoin anchoring</span><span class="v">OpenTimestamps · <a href="${otsUrl}">download .ots proof</a> · <a href="https://opentimestamps.org" target="_blank" rel="noopener">verify</a></span></div>`
+        : `<div class="row"><span class="k">Bitcoin anchoring</span><span class="v muted">not available for this fingerprint</span></div>`)
+    : (hasOts
+        ? `<div class="row"><span class="k">Ancoraggio Bitcoin</span><span class="v">OpenTimestamps · <a href="${otsUrl}">scarica prova .ots</a> · <a href="https://opentimestamps.org" target="_blank" rel="noopener">verifica</a></span></div>`
+        : `<div class="row"><span class="k">Ancoraggio Bitcoin</span><span class="v muted">non disponibile per questa impronta</span></div>`);
 
-  const headExtra =
-    `<meta property="og:title" content="Certificato verificabile — Spazio Genesi">
+  const headExtra = en
+    ? `<meta property="og:title" content="Verifiable certificate — Spazio Genesi">
+<meta property="og:description" content="Attestation of existence and integrity of a digital work. SHA-256 fingerprint, date, Bitcoin anchoring.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="${permaUrl}">
+<meta property="og:image" content="${CERT_PAGE_BASE}/og.png">
+<link rel="canonical" href="${permaUrl}">`
+    : `<meta property="og:title" content="Certificato verificabile — Spazio Genesi">
 <meta property="og:description" content="Attestazione di esistenza e integrità di un'opera digitale. Impronta SHA-256, data, ancoraggio Bitcoin.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="${permaUrl}">
 <meta property="og:image" content="${CERT_PAGE_BASE}/og.png">
 <link rel="canonical" href="${permaUrl}">`;
 
-  const body = `
+  const checkIcon = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>`;
+
+  const body = en ? `
       <span class="pill">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+        ${checkIcon}
+        Attested work
+      </span>
+      <h1>Verifiable certificate</h1>
+      <p class="muted">This page certifies that the file with the fingerprint below was attested by Spazio Genesi ETS on the date indicated.</p>
+
+      <div class="grid">
+        <div class="row"><span class="k">Fingerprint (SHA-256)</span><span class="v fingerprint">${escHtml(hash)} <button class="copy" type="button" data-hash="${hash}" data-lang="en">copy</button></span></div>
+        <div class="row"><span class="k">Algorithm</span><span class="v">${escHtml((m && m.algoritmo) || "SHA-256")}</span></div>
+        <div class="row"><span class="k">Attestation date</span><span class="v">${escHtml(dateText)}</span></div>
+        ${m?.tipo_mime ? `<div class="row"><span class="k">File type</span><span class="v">${escHtml(m.tipo_mime)}</span></div>` : ""}
+        ${otsRow}
+        ${declaredRows ? `<div class="row" style="border:none;padding-bottom:.2rem"><span class="k" style="flex-basis:100%;color:var(--oro);font-weight:600">Author-declared data</span></div>${declaredRows}` : ""}
+      </div>
+
+      <div class="qr">
+        ${qrSvg(permaUrl)}
+        <div class="cap">Scan to reopen this page</div>
+      </div>
+
+      <div class="actions">
+        ${hasCert ? `<a class="btn primary" href="${certUrl}">Download the PDF certificate</a>` : ""}
+        <a class="btn" href="${verifyUrl}">Verify with the original file</a>
+        ${hasOts ? `<a class="btn" href="${otsUrl}">Blockchain proof (.ots)</a>` : ""}
+      </div>
+      <script src="${API_BASE}/js/cert-page.js" defer></script>` : `
+      <span class="pill">
+        ${checkIcon}
         Opera attestata
       </span>
       <h1>Certificato verificabile</h1>
@@ -4107,7 +4267,7 @@ function certPageHtml(hash, m, certIso, hasCert, hasOts) {
       </div>
       <script src="${API_BASE}/js/cert-page.js" defer></script>`;
 
-  return certPageShell("Certificato verificabile", body, headExtra);
+  return certPageShell(en ? "Verifiable certificate" : "Certificato verificabile", body, headExtra, lang);
 }
 
 // ── /api/badge — badge SVG "Opera attestata" ─────────────────────────────────
