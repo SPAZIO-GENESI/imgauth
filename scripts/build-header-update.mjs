@@ -53,8 +53,15 @@ async function aggiornaTestata(inputPath, outputPath, { titolo, sottotitolo, cre
   svuota("tangram.page");
   svuota(" - Design by ");
   svuota("mentesutela.it");
-  // Icona penna/tangram (Im2) accanto al credito: rimappata via Resources come
-  // il logo — resta comunque nascosta dietro il nuovo testo (drawRectangle sotto).
+
+  // Icona penna/tangram (Im2) accanto al vecchio credito: rimossa dal blocco
+  // "q ... /Im2 Do ... Q" del content stream. Il primo tentativo la copriva
+  // con un rettangolo color-carta, che però tagliava un pezzo visibile della
+  // filigrana "SPAZIO GENESI ETS" sullo sfondo (quadrato bianco segnalato dal
+  // gestore) — rimuoverla è pulito e non lascia alcun artefatto.
+  const im2Re = /q\s+18\.7619781 0 0 18\.8105316 195\.8364868 276\.3939209 cm\s*\/Im2 Do\s*Q\s*/;
+  if (!im2Re.test(content)) throw new Error("blocco Im2 non trovato");
+  content = content.replace(im2Re, "");
 
   const nuovoStream = doc.context.flateStream(Uint8Array.from(Buffer.from(content, "latin1")));
   page.node.set(PDFName.of("Contents"), doc.context.register(nuovoStream));
@@ -63,10 +70,6 @@ async function aggiornaTestata(inputPath, outputPath, { titolo, sottotitolo, cre
   const bold = await doc.embedFont(StandardFonts.TimesRomanBold);
   const regular = await doc.embedFont(StandardFonts.TimesRoman);
   const boldItalic = await doc.embedFont(StandardFonts.TimesRomanBoldItalic);
-
-  // Copre il vecchio Im2 (icona penna/tangram) col colore carta della pagina.
-  const carta = rgb(0.984, 0.980, 0.965);
-  page.drawRectangle({ x: 180, y: 260, width: 40, height: 40, color: carta });
 
   // Titolo su due righe. Centrato NON sull'intera pagina ma nello spazio
   // libero fra il bordo destro del logo (~166pt) e il bordo sinistro del QR
