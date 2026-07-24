@@ -2231,16 +2231,68 @@ function certFilenameStamp() {
   return new Date().toISOString().replace(/[:.]/g, "-");
 }
 
-async function fillCertificatePdf(d, meta, otsUrl) {
+async function fillCertificatePdf(d, meta, otsUrl, lang = "it") {
   const doc = await PDFDocument.load(certTemplatePdf);
   const form = doc.getForm();
+
+  // ── i18n MVP (P41 F4) — SOLO le etichette/prose disegnate a runtime ─────────
+  // Le etichette AcroForm stampate nel template (TITOLO, DIMENSIONE, MIME,
+  // SHA-256, ecc.) restano italiane: sono grafica del template, tradurle
+  // richiederebbe un nuovo template = cambio di layout (fuori perimetro F4).
+  // La lingua NON entra mai nella firma HMAC (vedi hmacMessage): è resa, non
+  // dato attestato. Assente/qualunque valore ≠ "en" → "it", certificato
+  // bit-identico a prima di P41.
+  const en = lang === "en";
+  const L = en ? {
+    attestBox:    "Attestation string:",
+    entity1:      "Spazio Genesi ETS — Tax code 96602450585 — RUNTS reg. no. 174701 (15/06/2026) — Registered office: Via Francesco Caracciolo 14, 00167 Roma (RM)",
+    entity2:      "Operating office: Galleria Commerciale Via Roma 215, first floor, L'Aquila (AQ) — Automatically generated document, no manual signature required.",
+    declaredHead: "Author-declared data",
+    title:        "Title",
+    author:       "Author",
+    year:         "Year/version",
+    notes:        "Notes",
+    declaredNote: "Data provided by the author at the time of attestation and bound to the HMAC signature: cannot be changed after issuance. It does not constitute proof of authorship of the work.",
+    techHead:     "Technical details",
+    hmacLabel:    "HMAC signature (server)",
+    issuedBy:     "Issued by",
+    engine:       "Engine",
+    file:         "File",
+    certOnline:   "Certificate verifiable online",
+    anchor:       (url) => `Blockchain anchoring (OpenTimestamps, Bitcoin): proof downloadable at ${url} — verify at https://opentimestamps.org`,
+    assoc:        "Association website: https://spaziogenesi.org",
+  } : {
+    attestBox:    "Stringa di attestazione:",
+    entity1:      "Spazio Genesi ETS — Codice fiscale 96602450585 — RUNTS rep. n. 174701 (15/06/2026) — Sede legale: Via Francesco Caracciolo 14, 00167 Roma (RM)",
+    entity2:      "Sede operativa: Galleria Commerciale Via Roma 215, primo piano, L'Aquila (AQ) — Documento generato automaticamente, non richiede firma manuale.",
+    declaredHead: "Dati dichiarati dall'autore",
+    title:        "Titolo",
+    author:       "Autore",
+    year:         "Anno/versione",
+    notes:        "Note",
+    declaredNote: "Dati forniti dall'autore al momento dell'attestazione e vincolati alla firma HMAC: non modificabili dopo l'emissione. Non costituiscono prova di paternità dell'opera.",
+    techHead:     "Dettagli tecnici",
+    hmacLabel:    "Firma HMAC (server)",
+    issuedBy:     "Emesso da",
+    engine:       "Motore",
+    file:         "File",
+    certOnline:   "Certificato verificabile online",
+    anchor:       (url) => `Ancoraggio blockchain (OpenTimestamps, Bitcoin): prova scaricabile da ${url} — verifica su https://opentimestamps.org`,
+    assoc:        "Sito dell'associazione: https://spaziogenesi.org",
+  };
 
   form.getTextField("TITOLO").setText(String(d.opera ?? ""));
   form.getTextField("DIMENSIONE").setText(String(d.dimensione_bytes ?? ""));
   form.getTextField("MIME").setText(String(d.tipo_mime ?? ""));
   form.getTextField("SHA-256").setText(String(d.sha256 ?? ""));
   form.getTextField("TIMEISO").setText(String(d.timestamp_iso ?? ""));
-  form.getTextField("TIMELEG").setText(String(d.timestamp_leggibile ?? ""));
+  // Timestamp umano: per "en" ricalcolato dall'ISO in inglese (la stringa
+  // timestamp_leggibile round-trippata dal client è fissata in italiano); per
+  // "it" resta esattamente d.timestamp_leggibile (bit-identico).
+  const timeLeg = en
+    ? (humanTsEN(String(d.timestamp_iso ?? "")) || String(d.timestamp_leggibile ?? ""))
+    : String(d.timestamp_leggibile ?? "");
+  form.getTextField("TIMELEG").setText(timeLeg);
 
   // Il box ATTESTAZIONE del template è alto ~32pt (≈3 righe a font 9): contiene
   // SOLO etichetta + stringa. Le righe che in passato vi venivano accodate
@@ -2248,7 +2300,7 @@ async function fillCertificatePdf(d, meta, otsUrl) {
   // vivono nel blocco "Dettagli tecnici" disegnato a runtime in fondo pagina.
   const attestField = form.getTextField("ATTESTAZIONE");
   attestField.enableMultiline();
-  attestField.setText(`Stringa di attestazione:\n${String(d.attestazione ?? "")}`);
+  attestField.setText(`${L.attestBox}\n${String(d.attestazione ?? "")}`);
 
   form.flatten();
 
@@ -2302,15 +2354,10 @@ async function fillCertificatePdf(d, meta, otsUrl) {
   // Dati dell'ente su due righe: C.F., iscrizione RUNTS e sede legale (Roma),
   // poi sede operativa (L'Aquila). La riga inferiore scende a y=296.5 per non
   // toccare il credito "Realizzato da tangram" del template (~y 285).
-  // Larghezze @7pt Times: riga 1 = 441.8pt, riga 2 = 431.2pt (utile ~505pt).
-  drawCentered(
-    "Spazio Genesi ETS — Codice fiscale 96602450585 — RUNTS rep. n. 174701 (15/06/2026) — Sede legale: Via Francesco Caracciolo 14, 00167 Roma (RM)",
-    306.5, 7, grigio
-  );
-  drawCentered(
-    "Sede operativa: Galleria Commerciale Via Roma 215, primo piano, L'Aquila (AQ) — Documento generato automaticamente, non richiede firma manuale.",
-    296.5, 7, grigio
-  );
+  // Larghezze @7pt Times: IT 441.8/431.2pt, EN 446.3/422.8pt (utile ~505pt) —
+  // entrambe le lingue rientrano nella larghezza centrabile (verificato F4).
+  drawCentered(L.entity1, 306.5, 7, grigio);
+  drawCentered(L.entity2, 296.5, 7, grigio);
 
   // URL nel footer: la pagina di verifica con l'hash già precompilato (stessa
   // destinazione del QR). Chi copia o clicca il link atterra sulla verifica con
@@ -2354,28 +2401,29 @@ async function fillCertificatePdf(d, meta, otsUrl) {
   // 1) Dati dichiarati dall'autore — leggibili, solo se presenti
   const hasDeclared = meta && (meta.titolo || meta.autore || meta.anno || meta.note);
   if (hasDeclared) {
-    drawWrapped("Dati dichiarati dall'autore", 8.5, oro);
+    drawWrapped(L.declaredHead, 8.5, oro);
     blockY -= 2;
-    if (meta.titolo) drawWrapped(`Titolo: ${meta.titolo}`, 8, nero);
-    if (meta.autore) drawWrapped(`Autore: ${meta.autore}`, 8, nero);
-    if (meta.anno)   drawWrapped(`Anno/versione: ${meta.anno}`, 8, nero);
-    if (meta.note)   drawWrapped(`Note: ${meta.note}`, 8, nero);
-    drawWrapped("Dati forniti dall'autore al momento dell'attestazione e vincolati alla firma HMAC: non modificabili dopo l'emissione. Non costituiscono prova di paternità dell'opera.", 6.5, grigio);
+    if (meta.titolo) drawWrapped(`${L.title}: ${meta.titolo}`, 8, nero);
+    if (meta.autore) drawWrapped(`${L.author}: ${meta.autore}`, 8, nero);
+    if (meta.anno)   drawWrapped(`${L.year}: ${meta.anno}`, 8, nero);
+    if (meta.note)   drawWrapped(`${L.notes}: ${meta.note}`, 8, nero);
+    drawWrapped(L.declaredNote, 6.5, grigio);
     blockY -= 5;
   }
 
   // 2) Dettagli tecnici — fine print
-  drawWrapped("Dettagli tecnici", 7.5, oro);
+  drawWrapped(L.techHead, 7.5, oro);
   blockY -= 1;
-  if (d.hmac) drawWrapped(`Firma HMAC (server): ${String(d.hmac)}`, 6.5, grigio);
-  drawWrapped(`Emesso da: ${String(d.emesso_da ?? "Spazio Genesi ETS — Attestazione Opere")} — Motore: imgauth v${APP_VERSION} — File: ${String(d.opera ?? "")}`, 6.5, grigio);
+  if (d.hmac) drawWrapped(`${L.hmacLabel}: ${String(d.hmac)}`, 6.5, grigio);
+  drawWrapped(`${L.issuedBy}: ${String(d.emesso_da ?? "Spazio Genesi ETS — Attestazione Opere")} — ${L.engine}: imgauth v${APP_VERSION} — ${L.file}: ${String(d.opera ?? "")}`, 6.5, grigio);
   // Pagina permanente di verifica online: stessa impronta, consultabile da chiunque
   // riceva il certificato (impronta, data, algoritmo, ancoraggio OTS, QR).
-  drawWrapped(`Certificato verificabile online: ${CERT_PAGE_BASE}/c/${d.sha256 ?? ""}`, 6.5, oro);
+  // URL invariata per lingua (QR e link di verifica restano invariati in F4).
+  drawWrapped(`${L.certOnline}: ${CERT_PAGE_BASE}/c/${d.sha256 ?? ""}`, 6.5, oro);
   if (otsUrl) {
-    drawWrapped(`Ancoraggio blockchain (OpenTimestamps, Bitcoin): prova scaricabile da ${otsUrl} — verifica su https://opentimestamps.org`, 6.5, grigio);
+    drawWrapped(L.anchor(otsUrl), 6.5, grigio);
   }
-  drawWrapped("Sito dell'associazione: https://spaziogenesi.org", 6.5, oro);
+  drawWrapped(L.assoc, 6.5, oro);
 
   const bytes = await doc.save();
   return new Uint8Array(bytes);
@@ -2472,7 +2520,9 @@ async function handlePdf(request, env, ctx) {
     // il certificato esce comunque, semplicemente senza la riga OpenTimestamps.
     const otsUrl = await ensureOtsProof(sha256, env);
 
-    const pdfBytes = await fillCertificatePdf(d, meta, otsUrl);
+    // lang: solo la resa delle etichette/prose disegnate a runtime nel PDF —
+    // mai la firma HMAC (già verificata sopra su hmacMessage, che ignora lang).
+    const pdfBytes = await fillCertificatePdf(d, meta, otsUrl, lang);
 
     let finalBytes = pdfBytes;
 
@@ -4009,6 +4059,21 @@ function formatDateEN(iso) {
   const hh = String(dt.getUTCHours()).padStart(2, "0");
   const mm = String(dt.getUTCMinutes()).padStart(2, "0");
   return `${MONTHS_EN[dt.getUTCMonth() + 1]} ${dt.getUTCDate()}, ${dt.getUTCFullYear()}, ${hh}:${mm} UTC`;
+}
+
+// Equivalente inglese di humanTs (giorno/mese/anno — hh:mm:ss UTC, con secondi):
+// per il campo TIMELEG del certificato PDF in inglese (P41 F4). Ricalcolato
+// dall'ISO — la stringa timestamp_leggibile salvata all'emissione è fissata in
+// italiano. humanTs resta invariata: è il default "it".
+function humanTsEN(iso) {
+  const dt = new Date(iso);
+  if (isNaN(dt.getTime())) return "";
+  const day = String(dt.getUTCDate()).padStart(2, "0");
+  const mon = MONTHS_EN[dt.getUTCMonth() + 1];
+  const hh  = String(dt.getUTCHours()).padStart(2, "0");
+  const mm  = String(dt.getUTCMinutes()).padStart(2, "0");
+  const ss  = String(dt.getUTCSeconds()).padStart(2, "0");
+  return `${mon} ${day}, ${dt.getUTCFullYear()} — ${hh}:${mm}:${ss} UTC`;
 }
 
 // QR come SVG vettoriale (nessuna dipendenza esterna): codifica l'URL passato.
