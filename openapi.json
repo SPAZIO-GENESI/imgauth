@@ -2,7 +2,7 @@
   "openapi": "3.0.3",
   "info": {
     "title": "imgauth — API di attestazione opere digitali",
-    "version": "1.32.0",
+    "version": "1.33.0",
     "description": "Motore di attestazione Spazio Genesi ETS. Full privacy: l'impronta SHA-256 si calcola sul client, il file non viene mai inviato al server. Contratto reale in italiano (non tradurre i nomi campo). Vedi https://attestazione.spaziogenesi.org per l'interfaccia utente e https://github.com/SPAZIO-GENESI/imgauth per il codice sorgente (AGPL-3.0).",
     "contact": { "name": "Spazio Genesi ETS", "url": "https://spaziogenesi.org" },
     "license": { "name": "AGPL-3.0-only", "url": "https://github.com/SPAZIO-GENESI/imgauth/blob/main/LICENSE" }
@@ -109,7 +109,7 @@
     "/api/cert-pdf": {
       "post": {
         "summary": "Genera il certificato PDF firmato",
-        "description": "Riceve l'oggetto restituito da POST /api/hash (deve includere `attestazione` + `hmac`, verificati server-side prima di firmare). Chiama authart server-to-server per la firma crittografica; archivia copia in R2. Campo facoltativo `lang` (it|en, P41) per i soli messaggi d'errore: non influisce sul contenuto del PDF (etichette sempre italiane) né sulla firma HMAC.",
+        "description": "Riceve l'oggetto restituito da POST /api/hash (deve includere `attestazione` + `hmac`, verificati server-side prima di firmare). Chiama authart server-to-server per la firma crittografica; archivia copia in R2. Campo facoltativo `lang` (it|en, P41): sceglie la lingua dei messaggi d'errore e della prosa disegnata a runtime nel PDF (stringa di attestazione, dati dichiarati, dettagli tecnici, data leggibile). Le etichette del template AcroForm (TITOLO, DIMENSIONE, MIME, SHA-256…) restano italiane. Non influisce sul contenuto attestato né sulla firma HMAC: lo stesso token è valido in entrambe le lingue.",
         "security": [ { "agentBearer": [] }, { "voucherHeader": [] }, {} ],
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "description": "Oggetto completo restituito da POST /api/hash" } } } },
         "responses": {
