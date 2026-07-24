@@ -35,6 +35,10 @@ import { PDFDocument, rgb, StandardFonts } from "pdf-lib";
 import { encode as encodeQR } from "uqr";
 import Stripe from "stripe";
 import certTemplatePdf from "./certificato_opera_pdf_mod.pdf";
+// Template inglese (P42): stesse coordinate, stessi nomi di campo AcroForm, sole
+// etichette tradotte. Generato da scripts/build-template-en.mjs a partire da
+// quello italiano — non va modificato a mano: si rigenera.
+import certTemplatePdfEn from "./certificato_opera_pdf_en.pdf";
 import pkg from "./package.json";
 import openapiSpec from "./openapi.json";
 
@@ -2069,7 +2073,12 @@ async function handleHash(request, env, ctx) {
     const tsHuman  = humanTs(now);
 
     const attestazione = `SHA-256:${digest}@${tsIso}`;
-    const issuer       = "Spazio Genesi ETS — Attestazione Opere";
+    // Nome dell'emittente nella lingua della richiesta (P42): è un campo
+    // descrittivo, NON entra in hmacMessage — la firma copre attestazione e
+    // metadati dichiarati, non questo.
+    const issuer       = lang === "en"
+      ? "Spazio Genesi ETS — Digital Work Attestation"
+      : "Spazio Genesi ETS — Attestazione Opere";
 
     // Metadati dichiarati (facoltativi): normalizzati qui e VINCOLATI al token
     // HMAC, così non sono alterabili dopo l'emissione. Restituiti nella risposta
@@ -2232,7 +2241,9 @@ function certFilenameStamp() {
 }
 
 async function fillCertificatePdf(d, meta, otsUrl, lang = "it") {
-  const doc = await PDFDocument.load(certTemplatePdf);
+  // P42: template per lingua. I nomi dei campi AcroForm sono identici nei due
+  // file, quindi tutto il codice sotto resta invariato.
+  const doc = await PDFDocument.load(lang === "en" ? certTemplatePdfEn : certTemplatePdf);
   const form = doc.getForm();
 
   // ── i18n MVP (P41 F4) — SOLO le etichette/prose disegnate a runtime ─────────
@@ -2245,7 +2256,7 @@ async function fillCertificatePdf(d, meta, otsUrl, lang = "it") {
   const en = lang === "en";
   const L = en ? {
     attestBox:    "Attestation string:",
-    entity1:      "Spazio Genesi ETS — Tax code 96602450585 — RUNTS reg. no. 174701 (15/06/2026) — Registered office: Via Francesco Caracciolo 14, 00167 Roma (RM)",
+    entity1:      "Spazio Genesi ETS — Tax code 96602450585 — RUNTS reg. no. 174701 (15 June 2026) — Registered office: Via Francesco Caracciolo 14, 00167 Roma (RM)",
     entity2:      "Operating office: Galleria Commerciale Via Roma 215, first floor, L'Aquila (AQ) — Automatically generated document, no manual signature required.",
     declaredHead: "Author-declared data",
     title:        "Title",
@@ -2344,6 +2355,45 @@ async function fillCertificatePdf(d, meta, otsUrl, lang = "it") {
   const grigio = rgb(0.478, 0.439, 0.376); // colore testo grigio del footer template
   const oro    = rgb(0.545, 0.412, 0.078); // colore "oro" dei link/accent del template
   const pageW  = page.getWidth();          // 595.276 pt (A4)
+
+  // ── Etichette del template, in inglese (P42) ────────────────────────────────
+  // Nel template inglese quelle etichette sono state SVUOTATE dal content stream
+  // (scripts/build-template-en.mjs) perché il font incorporato è un sottoinsieme
+  // privo dei glifi W, K, Y, U: riscriverle sul posto produceva "DIGITAL OR" e
+  // "MIME T PE". Qui si ridisegnano con Times Roman standard — metricamente
+  // equivalente al Times New Roman del template — alle stesse coordinate, corpo e
+  // colore, misurate dal content stream italiano.
+  // ⚠️ Le etichette di riga (x=62.69) devono restare entro x=181.7, dove inizia la
+  // colonna dei valori: per questo "TIMESTAMP LEGGIBILE" diventa "READABLE
+  // TIMESTAMP" e non "HUMAN-READABLE TIMESTAMP", che sfora di 17pt.
+  if (lang === "en") {
+    const bold = await doc.embedFont(StandardFonts.TimesRomanBold);
+
+    // ⚠️ Il titolo NON si disegna più qui (P42): è statico nel template
+    // certificato_opera_pdf_en.pdf insieme a logo/sottotitolo/credito — vedi
+    // scripts/build-header-update.mjs. Restano a runtime solo le etichette di
+    // corpo sotto, perché contengono lo stesso testo per ogni certificato ma
+    // vivono accanto ai VALORI (hash, dimensione…) che cambiano ogni volta.
+    // Intestazioni di sezione (x=57.02, 8pt) ed etichette di riga (x=62.69, 8.5pt)
+    for (const [text, x, y, size] of [
+      ["WORK DETAILS",              57.024, 625.973, 8],
+      ["WORK",                      62.693, 607.639, 8.5],
+      ["SIZE",                      62.693, 586.639, 8.5],
+      ["MIME TYPE",                 62.693, 565.639, 8.5],
+      ["CRYPTOGRAPHIC FINGERPRINT", 57.024, 525.462, 8],
+      ["ISO 8601 TIMESTAMP",        62.693, 488.127, 8.5],
+      ["READABLE TIMESTAMP",        62.693, 469.127, 8.5],
+      ["ATTESTATION STRING",        57.024, 426.115, 8],
+    ]) {
+      page.drawText(text, { x, y, size, font: bold, color: oro });
+    }
+    // Riga sotto il QR (centrata, 7pt, grigio del template)
+    const qr = "To verify the authenticity of this certificate, scan the QR code or visit:";
+    page.drawText(qr, {
+      x: (pageW - font.widthOfTextAtSize(qr, 7)) / 2,
+      y: 334.36, size: 7, font, color: grigio,
+    });
+  }
 
   // Helper: disegna testo centrato orizzontalmente sulla pagina
   const drawCentered = (text, y, size, color) => {
