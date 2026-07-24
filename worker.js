@@ -4071,7 +4071,7 @@ async function handleCertPage(url, env) {
       lang === "en" ? "Attestation not found" : "Attestazione non trovata",
       lang === "en"
         ? `<p class="lead">No attestation is on record for this fingerprint.</p>
-       <p class="muted">If you just issued the certificate, wait a moment and reload. To attest a new work, go to <a href="${CERT_PAGE_BASE}">attestazione.spaziogenesi.org</a>.</p>
+       <p class="muted">If you just issued the certificate, wait a moment and reload. To attest a new work, go to <a href="${CERT_PAGE_BASE}/en/">attestazione.spaziogenesi.org</a>.</p>
        <p class="fingerprint">${escHtml(hash)}</p>`
         : `<p class="lead">Nessuna attestazione risulta in archivio per questa impronta.</p>
        <p class="muted">Se hai appena emesso il certificato, attendi qualche istante e ricarica. Per attestare una nuova opera vai su <a href="${CERT_PAGE_BASE}">attestazione.spaziogenesi.org</a>.</p>
@@ -4140,15 +4140,15 @@ ${headExtra}
   <div class="wrap">
     <div class="card">
       <div class="brand">
-        <a class="brand-svc" href="${CERT_PAGE_BASE}" aria-label="Attestazione — home del servizio">
+        <a class="brand-svc" href="${CERT_PAGE_BASE}${lang === "en" ? "/en/" : ""}" aria-label="${lang === "en" ? "Attestation — service home" : "Attestazione — home del servizio"}">
           <svg class="brand-logo" viewBox="0 0 700 700" aria-hidden="true"><path fill="#8B6914" d="M0,0 L700,0 L700,196.81 L597.87,196.81 L597.87,102.13 L102.13,102.13 L102.13,597.87 L597.87,597.87 L597.87,503.19 L700,503.19 L700,700 L0,700 Z"/><circle fill="#1f1d18" cx="350" cy="350" r="153.19"/><rect fill="#1f1d18" x="490.53" y="291.49" width="209.44" height="117.03"/></svg>
-          <b>Attestazione</b>
+          <b>${lang === "en" ? "Attestation" : "Attestazione"}</b>
         </a>
-        <a class="parent" href="https://spaziogenesi.org/" title="Spazio Genesi — l'ente dietro il servizio"><svg viewBox="0 0 580 481" aria-hidden="true"><g transform="translate(0,481) scale(0.1,-0.1)" fill="currentColor" stroke="none"><path d="M2175 4799 c-729 -75 -1378 -467 -1780 -1074 -82 -124 -203 -366 -252 -505 -100 -282 -137 -506 -137 -815 0 -222 6 -283 46 -497 l23 -118 1396 0 1397 0 26 -83 c37 -117 49 -216 43 -332 -24 -405 -299 -739 -698 -847 -120 -32 -328 -32 -448 0 -105 29 -210 76 -301 138 -77 51 -201 176 -240 242 l-25 41 -368 1 -368 0 63 -76 c142 -172 345 -355 533 -479 124 -82 366 -203 505 -252 281 -100 505 -137 815 -137 310 0 534 37 815 137 139 49 381 170 505 252 265 175 514 425 690 690 94 141 214 391 269 558 l49 147 534 0 533 0 0 565 0 565 -1944 0 -1943 0 -27 59 c-53 119 -70 203 -70 361 0 168 18 251 84 388 51 106 88 161 169 246 83 86 166 145 275 197 142 66 218 82 391 82 122 0 165 -4 228 -21 99 -27 232 -89 310 -146 74 -52 190 -172 232 -238 l30 -48 413 0 c226 0 412 2 412 5 0 14 -172 214 -256 299 -190 190 -374 323 -619 447 -232 117 -479 196 -735 234 -127 19 -452 27 -575 14z"/></g></svg>un servizio di Spazio Genesi</a>
+        <a class="parent" href="https://spaziogenesi.org/" title="${lang === "en" ? "Spazio Genesi — the organization behind the service" : "Spazio Genesi — l'ente dietro il servizio"}"><svg viewBox="0 0 580 481" aria-hidden="true"><g transform="translate(0,481) scale(0.1,-0.1)" fill="currentColor" stroke="none"><path d="M2175 4799 c-729 -75 -1378 -467 -1780 -1074 -82 -124 -203 -366 -252 -505 -100 -282 -137 -506 -137 -815 0 -222 6 -283 46 -497 l23 -118 1396 0 1397 0 26 -83 c37 -117 49 -216 43 -332 -24 -405 -299 -739 -698 -847 -120 -32 -328 -32 -448 0 -105 29 -210 76 -301 138 -77 51 -201 176 -240 242 l-25 41 -368 1 -368 0 63 -76 c142 -172 345 -355 533 -479 124 -82 366 -203 505 -252 281 -100 505 -137 815 -137 310 0 534 37 815 137 139 49 381 170 505 252 265 175 514 425 690 690 94 141 214 391 269 558 l49 147 534 0 533 0 0 565 0 565 -1944 0 -1943 0 -27 59 c-53 119 -70 203 -70 361 0 168 18 251 84 388 51 106 88 161 169 246 83 86 166 145 275 197 142 66 218 82 391 82 122 0 165 -4 228 -21 99 -27 232 -89 310 -146 74 -52 190 -172 232 -238 l30 -48 413 0 c226 0 412 2 412 5 0 14 -172 214 -256 299 -190 190 -374 323 -619 447 -232 117 -479 196 -735 234 -127 19 -452 27 -575 14z"/></g></svg>${lang === "en" ? "a service by Spazio Genesi" : "un servizio di Spazio Genesi"}</a>
       </div>
       ${bodyHtml}
       <div class="foot">
-        Spazio Genesi ETS — Codice fiscale 96602450585 — <a href="${CERT_PAGE_BASE}">attestazione.spaziogenesi.org</a><br>
+        Spazio Genesi ETS — Codice fiscale 96602450585 — <a href="${CERT_PAGE_BASE}${lang === "en" ? "/en/" : ""}">attestazione.spaziogenesi.org</a><br>
         ${lang === "en"
           ? "This attestation proves the existence and integrity of the file at a given date; it does not, by itself, prove authorship of the work."
           : "L'attestazione prova l'esistenza e l'integrità del file a una certa data; non costituisce di per sé prova di paternità dell'opera."}
@@ -4172,7 +4172,10 @@ function certPageHtml(hash, m, certIso, hasCert, hasOts, lang = "it") {
     : ((m && m.timestamp_leggibile) || formatDateIT(dateIso) || "data non disponibile");
   const otsUrl   = `${API_BASE}/api/ots?hash=${hash}`;
   const certUrl  = `${API_BASE}/api/cert?hash=${hash}`;
-  const verifyUrl = `${CERT_PAGE_BASE}?hash=${hash}`;
+  // en: la verifica deve atterrare sull'home INGLESE (esiste da F2), non su
+  // quella italiana con un pulsante "Verify..." che porta a una pagina in
+  // italiano.
+  const verifyUrl = `${CERT_PAGE_BASE}${en ? "/en/" : ""}?hash=${hash}`;
 
   // Riga dati dichiarati (solo se presenti): sono auto-dichiarazioni vincolate alla firma.
   const declaredLabels = en
