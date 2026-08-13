@@ -2,6 +2,7 @@ ATTESTATORE DI OPERE
 sistema di notarizzazione opere digitali
 
 [![Genesis Trust Score](https://trust.spaziogenesi.org/badge.svg)](https://trust.spaziogenesi.org)
+[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/SPAZIO-GENESI/imgauth/badge)](https://scorecard.dev/viewer/?uri=github.com/SPAZIO-GENESI/imgauth)
 
 su cloudflare
 
