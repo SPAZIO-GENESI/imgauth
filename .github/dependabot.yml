@@ -1,0 +1,15 @@
+# Aggiornamenti automatici delle dipendenze npm e delle GitHub Action usate
+# nei workflow (l'aggiornamento delle action stesse è spesso dimenticato,
+# ed è un vettore reale). Triage settimanale: vedi PRC-security-alert-triage
+# nel registro gtf — voce A3 del piano P43, parte 2.
+
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
