@@ -14,6 +14,12 @@ on:
     - cron: "0 3 * * 6"
   workflow_dispatch:
 
+# Default minimo esplicito: il job sotto lo sovrascrive già con lo stretto
+# necessario, ma Scorecard vuole anche un default a livello di workflow
+# (difesa in profondità per eventuali job futuri). Scorecard/A3-parte4.
+permissions:
+  contents: read
+
 jobs:
   analyze:
     name: Analyze (javascript-typescript)
