@@ -92,17 +92,19 @@ jobs:
               return righe.join("\n");
             }
 
+            // TELEGRAM_CHAT_ID può contenere più chat id separati da virgola
+            // (stesso pattern di worker.js/telegramChatIds e di gtf/check-cadences.mjs).
             async function telegram(text) {
               const token = process.env.TELEGRAM_BOT_TOKEN;
-              const chat = process.env.TELEGRAM_CHAT_ID;
-              if (!token || !chat) return;
-              try {
-                await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+              const chats = String(process.env.TELEGRAM_CHAT_ID || "").split(",").map((s) => s.trim()).filter(Boolean);
+              if (!token || !chats.length) return;
+              await Promise.all(chats.map((chat) =>
+                fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
                   method: "POST",
                   headers: { "Content-Type": "application/json" },
                   body: JSON.stringify({ chat_id: chat, text, disable_web_page_preview: true }),
-                });
-              } catch (e) { core.warning("Telegram fallito: " + e.message); }
+                }).catch((e) => core.warning(`Telegram fallito (chat ${chat}): ` + e.message))
+              ));
             }
 
             // 1) Sonda
@@ -189,15 +191,15 @@ jobs:
 
             async function telegram(text) {
               const token = process.env.TELEGRAM_BOT_TOKEN;
-              const chat = process.env.TELEGRAM_CHAT_ID;
-              if (!token || !chat) return;
-              try {
-                await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+              const chats = String(process.env.TELEGRAM_CHAT_ID || "").split(",").map((s) => s.trim()).filter(Boolean);
+              if (!token || !chats.length) return;
+              await Promise.all(chats.map((chat) =>
+                fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
                   method: "POST",
                   headers: { "Content-Type": "application/json" },
                   body: JSON.stringify({ chat_id: chat, text, disable_web_page_preview: true }),
-                });
-              } catch (e) { core.warning("Telegram fallito: " + e.message); }
+                }).catch((e) => core.warning(`Telegram fallito (chat ${chat}): ` + e.message))
+              ));
             }
 
             let valid = false;
