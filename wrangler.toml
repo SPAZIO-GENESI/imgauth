@@ -2,15 +2,24 @@ name = "imgauth"
 main = "worker.js"
 compatibility_date = "2024-09-23"
 
-# Smart Placement (2026-07-03): il Worker chiama ripetutamente un backend fisso e
-# "lontano" (authart su Azure Italy North, R2, TSA/OTS) più spesso di quanto risponda
-# a richieste vicine all'utente. Osservato via /api/health-log: gli health-check verso
-# authart misurati da Cloudflare (~1.3-2s) erano ~10x più lenti di una chiamata diretta
-# alla stessa URL (~150ms) — sintomo di tratta Worker→origine subottimale, non di lentezza
-# di authart stesso (l'endpoint / non fa nulla). Smart Placement lascia che Cloudflare
-# scelga dinamicamente dove eseguire in base a dove sono i backend più chiamati.
+# Placement esplicito (2026-08-15, sostituisce "smart" del 2026-07-03): la modalità
+# euristica non ha mai risolto il sintomo originale — /api/health-log ha continuato a
+# misurare ~1.2-1.4s verso authart (Azure Italy North) su OGNI campione del cron, mesi
+# dopo l'attivazione, contro ~150ms di una chiamata diretta alla stessa URL. Causa
+# individuata sulla documentazione Cloudflare corrente: (1) "smart" ottimizza SOLO gli
+# handler fetch(), mai lo scheduled() del cron — quindi il probe di /api/health-log non
+# ne avrebbe comunque beneficiato; (2) "smart" richiede traffico costante da location
+# diverse per imparare il piazzamento migliore, altrimenti resta INSUFFICIENT_INVOCATIONS
+# e non si attiva mai — plausibile per un servizio di nicchia, il che vuol dire che anche
+# le vere generazioni di certificato (POST /api/cert-pdf → authart /sign, un fetch() vero)
+# probabilmente pagavano la stessa tassa di rete. Dal 2026-01-22 Cloudflare offre un hint
+# di piazzamento ESPLICITO (mutuamente esclusivo con "smart"): niente apprendimento,
+# nessuna dipendenza dal volume di traffico, probe HTTP HEAD diretto sull'hostname reale
+# del backend critico. Azure Italy North è comunque in UE: non dovrebbe penalizzare R2
+# (giurisdizione EU) né D1 — verificabile su archive/anchor in /api/health-log dopo il
+# deploy. Se non migliora, si torna a `mode = "smart"` con lo stesso comando.
 [placement]
-mode = "smart"
+hostname = "sgart.azurewebsites.net"
 
 # Il custom domain imgauth.spaziogenesi.org è un CNAME proxato → imgauth.it-e3f.workers.dev:
 # dipende quindi dalla route workers.dev. Le versioni recenti di wrangler la disabilitano
