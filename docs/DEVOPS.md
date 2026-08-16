@@ -12,7 +12,7 @@ può essere pubblicato e citato come evidenza del processo di rilascio.
 > di un lavoro fermo: questa copia viene aggiornata ad ogni fase chiusa,
 > non solo alla fine.
 >
-> **Versione HTML**: https://trust.spaziogenesi.org/devops.html (stile
+> **Versione HTML**: https://attestazione.trust.spaziogenesi.org/devops/ (stile
 > Trust Center, con schemi SVG di parti e flusso; linkata dal footer del
 > Trust Center). Registrato nel [Genesis Trust Framework](https://trust.spaziogenesi.org)
 > come `ADR-P24` e `CTL-cicd-pipeline` (controllo verificabile: i run di
@@ -179,5 +179,5 @@ Ogni deploy staging esegue automaticamente, e chiunque può ripetere a mano:
 
 *Questa tabella viene aggiornata alla chiusura di ogni fase (data + esito),
 qui e nella copia interna (`DEVOPS.md`, hub) e nella versione HTML
-([trust.spaziogenesi.org/devops.html](https://trust.spaziogenesi.org/devops.html)),
+([attestazione.trust.spaziogenesi.org/devops/](https://attestazione.trust.spaziogenesi.org/devops/)),
 nello stesso giro.*
