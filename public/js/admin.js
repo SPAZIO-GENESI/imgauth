@@ -146,10 +146,13 @@
     return '<ol class="maint-steps">' + steps.map(function (s) {
       var html = "<li>" + escHtml(s.do);
       if (s.note) html += '<span class="note">' + escHtml(s.note) + "</span>";
-      if (s.link) {
-        html += '<a class="steplink" href="' + escHtml(s.link) + '" target="_blank" rel="noopener">' +
-          escHtml(s.link_label || "Apri") + " ↗</a>";
-      }
+      // Un passo può portare a più posti: senza un piano GitHub a pagamento
+      // non esiste una pagina che raccolga gli avvisi di tutti i repository,
+      // e cercarseli a mano è il modo più sicuro per saltare il giro.
+      (s.links || []).forEach(function (l) {
+        html += '<a class="steplink" href="' + escHtml(l.url) + '" target="_blank" rel="noopener">' +
+          escHtml(l.label || "Apri") + " ↗</a>";
+      });
       return html + "</li>";
     }).join("") + "</ol>";
   }
