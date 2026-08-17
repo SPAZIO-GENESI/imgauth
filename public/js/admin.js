@@ -36,11 +36,15 @@
     app.style.display = "";
     loadKeys();
     loadConventions();
+    // Caricata a ogni ingresso, non solo aprendo la scheda: serve a mettere il
+    // contatore rosso sul pulsante Manutenzione. Chi entra per altro deve
+    // accorgersi lo stesso che c'è una scadenza aperta.
+    loadMaintenance();
   }
 
   function showTab(name) {
-    var tabs = { keys: "tabKeys", conventions: "tabConventions", pro: "tabPro", integrations: "tabIntegrations" };
-    var btns = { keys: "tabBtnKeys", conventions: "tabBtnConventions", pro: "tabBtnPro", integrations: "tabBtnIntegrations" };
+    var tabs = { keys: "tabKeys", conventions: "tabConventions", pro: "tabPro", integrations: "tabIntegrations", maintenance: "tabMaintenance" };
+    var btns = { keys: "tabBtnKeys", conventions: "tabBtnConventions", pro: "tabBtnPro", integrations: "tabBtnIntegrations", maintenance: "tabBtnMaintenance" };
     Object.keys(tabs).forEach(function (t) {
       document.getElementById(tabs[t]).style.display = t === name ? "" : "none";
       document.getElementById(btns[t]).classList.toggle("active", t === name);
@@ -54,6 +58,7 @@
   document.getElementById("tabBtnConventions").addEventListener("click", function () { showTab("conventions"); loadConventions(); });
   document.getElementById("tabBtnPro").addEventListener("click", function () { showTab("pro"); loadProPricing(); loadProDiscounts(); loadProSubscribers(); });
   document.getElementById("tabBtnIntegrations").addEventListener("click", function () { showTab("integrations"); loadIntegrations(); loadPoolPricing(); });
+  document.getElementById("tabBtnMaintenance").addEventListener("click", function () { showTab("maintenance"); loadMaintenance(); });
 
   function fmtDate(iso) {
     if (!iso) return "—";
@@ -69,6 +74,142 @@
     return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
       return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
     });
+  }
+
+  // ── Manutenzione periodica ────────────────────────────────────────────────
+  // I dati arrivano dal registro pubblico del Genesis Trust Framework, che
+  // pubblica manutenzione.json insieme al proprio sito. Qui non c'è nessun
+  // testo di procedura: correggere un passo significa correggere il registro,
+  // non rilasciare il motore. Il file dichiara la data di scadenza e non i
+  // giorni di ritardo, che invecchierebbero tra una pubblicazione e l'altra:
+  // il conto dei giorni si fa qui, con la data di oggi.
+  var maintList = document.getElementById("maintList");
+  var maintStatus = document.getElementById("maintStatus");
+  var maintBadge = document.getElementById("maintBadge");
+
+  function todayUtcMs() {
+    var t = new Date();
+    return Date.UTC(t.getFullYear(), t.getMonth(), t.getDate());
+  }
+
+  function daysUntil(isoDay) {
+    if (!isoDay) return null;
+    var due = new Date(isoDay + "T00:00:00Z").getTime();
+    if (isNaN(due)) return null;
+    return Math.round((due - todayUtcMs()) / 86400000);
+  }
+
+  // Le date del registro sono in forma tecnica (2026-08-17). Qui le legge
+  // anche chi non lavora col registro: vanno scritte come si scrivono.
+  function fmtDay(isoDay) {
+    if (!isoDay) return "—";
+    try {
+      return new Date(isoDay + "T00:00:00Z").toLocaleDateString("it-IT", {
+        day: "numeric", month: "long", year: "numeric", timeZone: "UTC",
+      });
+    } catch (e) { return isoDay; }
+  }
+
+  function maintState(item) {
+    var d = daysUntil(item.next_due);
+    if (d === null || d < 0) return "due";
+    if (d <= 7) return "soon";
+    return "ok";
+  }
+
+  function maintPill(item, state) {
+    var d = daysUntil(item.next_due);
+    if (state === "due") {
+      if (item.never_run) return '<span class="pill due">Mai fatta</span>';
+      return '<span class="pill due">Da fare adesso</span>';
+    }
+    if (state === "soon") return '<span class="pill soon">Tra ' + (d === 0 ? "oggi" : d + " giorni") + "</span>";
+    return '<span class="pill ok">A posto</span>';
+  }
+
+  function maintMeta(item, state) {
+    var bits = [];
+    if (item.who) bits.push("Se ne occupa: <b>" + escHtml(item.who) + "</b>");
+    if (item.duration_minutes) bits.push("Ci vogliono circa " + item.duration_minutes + " minuti");
+    bits.push(item.frequency_days ? "Da ripetere ogni " + item.frequency_days + " giorni" : "Da ripetere ogni mese");
+    bits.push(item.last_done ? "Ultima volta: " + escHtml(fmtDay(item.last_done)) : "Mai eseguita finora");
+    var d = daysUntil(item.next_due);
+    if (state === "due" && !item.never_run && d !== null) bits.push("In ritardo di <b>" + Math.abs(d) + " giorni</b>");
+    else if (item.next_due) bits.push("Prossima scadenza: " + escHtml(fmtDay(item.next_due)));
+    return bits.join(" · ");
+  }
+
+  function maintStepsHtml(steps) {
+    if (!steps || !steps.length) {
+      return '<p class="msg err">Per questa manutenzione i passi non sono ancora scritti nel registro.</p>';
+    }
+    return '<ol class="maint-steps">' + steps.map(function (s) {
+      var html = "<li>" + escHtml(s.do);
+      if (s.note) html += '<span class="note">' + escHtml(s.note) + "</span>";
+      if (s.link) {
+        html += '<a class="steplink" href="' + escHtml(s.link) + '" target="_blank" rel="noopener">' +
+          escHtml(s.link_label || "Apri") + " ↗</a>";
+      }
+      return html + "</li>";
+    }).join("") + "</ol>";
+  }
+
+  function renderMaintenance(items) {
+    var order = { due: 0, soon: 1, ok: 2 };
+    var rows = items.map(function (i) { return { item: i, state: maintState(i) }; });
+    rows.sort(function (a, b) {
+      if (order[a.state] !== order[b.state]) return order[a.state] - order[b.state];
+      return String(a.item.next_due) < String(b.item.next_due) ? -1 : 1;
+    });
+
+    var dueCount = rows.filter(function (r) { return r.state === "due"; }).length;
+    maintBadge.textContent = dueCount ? String(dueCount) : "";
+    maintBadge.style.display = dueCount ? "" : "none";
+    maintStatus.textContent = dueCount
+      ? (dueCount === 1 ? "1 manutenzione da fare" : dueCount + " manutenzioni da fare")
+      : "Nessuna manutenzione in scadenza";
+    maintStatus.className = "loading-inline " + (dueCount ? "err" : "ok");
+
+    maintList.innerHTML = rows.map(function (r) {
+      var i = r.item;
+      var html = '<div class="maint ' + r.state + '">' +
+        '<div class="section-head" style="margin-bottom:0;"><h3>' + escHtml(i.title) + "</h3>" +
+        maintPill(i, r.state) + "</div>" +
+        '<p class="meta">' + maintMeta(i, r.state) + "</p>";
+      if (i.needs_technical) {
+        html += '<p class="maint-tech">Questa manutenzione richiede il terminale e gli accessi tecnici. ' +
+          "Se non è il tuo campo, non tentarla: segnala al gestore che è scaduta.</p>";
+      }
+      html += maintStepsHtml(i.steps);
+      if (i.registry_url) {
+        html += '<p class="meta"><a href="' + escHtml(i.registry_url) + '" target="_blank" rel="noopener">' +
+          "Questa procedura nel registro pubblico ↗</a></p>";
+      }
+      return html + "</div>";
+    }).join("");
+  }
+
+  function loadMaintenance() {
+    var src = document.getElementById("tabMaintenance").getAttribute("data-src");
+    maintStatus.textContent = "Carico…";
+    maintStatus.className = "loading-inline";
+    fetch(src, { cache: "no-store" })
+      .then(function (res) {
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        return res.json();
+      })
+      .then(function (body) { renderMaintenance(body.items || []); })
+      .catch(function (e) {
+        // Il registro è su un altro dominio: se non risponde, il pannello resta
+        // usabile e lo dice, invece di mostrare un elenco vuoto che sembrerebbe
+        // "nessuna manutenzione da fare" — la bugia più costosa possibile qui.
+        maintStatus.textContent = "Elenco non raggiungibile";
+        maintStatus.className = "loading-inline err";
+        maintBadge.style.display = "none";
+        maintList.innerHTML = '<p class="msg err">Non riesco a leggere l\'elenco delle manutenzioni (' +
+          escHtml(e.message) + "). Questo non vuol dire che non ce ne siano: riprova più tardi, " +
+          'oppure guarda il <a href="https://github.com/SPAZIO-GENESI/gtf/tree/main/tenants/attestazione/registry/processes" target="_blank" rel="noopener">registro pubblico</a>.</p>';
+      });
   }
 
   // ── Ordinamento/ricerca client-side (generico per entrambe le tabelle) ──

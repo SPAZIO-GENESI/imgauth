@@ -1524,10 +1524,39 @@ function adminPageHtml() {
     border:1px solid var(--oro); padding:.6rem .7rem; border-radius:8px; word-break:break-all; margin-top:.6rem; }
   input[type="number"] { width:5.5rem; }
   .qtybox { display:flex; gap:.4rem; align-items:center; }
-  .tabbar { display:flex; gap:.4rem; margin-bottom:1rem; border-bottom:1px solid var(--line); }
+  /* flex-wrap: con cinque schede la barra non entra nella larghezza di un
+     telefono, e senza a-capo faceva scorrere in orizzontale l'intera pagina
+     (difetto già presente con quattro). Chi apre il pannello dal telefono
+     dopo un avviso Telegram deve vedere tutte le schede, non trovarne una
+     nascosta oltre il bordo. */
+  .tabbar { display:flex; flex-wrap:wrap; gap:.4rem; margin-bottom:1rem; border-bottom:1px solid var(--line); }
   .tabbtn { font:inherit; font-weight:600; padding:.6rem 1rem; border:none; border-bottom:2px solid transparent;
     background:none; color:var(--muted); cursor:pointer; }
   .tabbtn.active { color:var(--oro); border-bottom-color:var(--oro); }
+  .tabbadge { display:inline-block; margin-left:.4rem; min-width:1.15rem; padding:0 .35rem; border-radius:999px;
+    background:var(--danger); color:#fff; font-size:.7rem; line-height:1.2rem; text-align:center; }
+  /* Scheda Manutenzione: le procedure ricorrenti, con i passi presi dal
+     registro pubblico (nessun testo di procedura è scritto qui dentro). */
+  .maint { border:1px solid var(--line); border-radius:10px; padding:1rem 1.1rem; margin-bottom:.9rem; }
+  .maint.due { border-color:var(--danger); border-left-width:4px; }
+  .maint.soon { border-color:var(--oro); border-left-width:4px; }
+  .maint h3 { margin:0; font-size:1rem; }
+  .maint .meta { color:var(--muted); font-size:.82rem; margin:.45rem 0 0; }
+  .maint .meta b { color:var(--ink); font-weight:600; }
+  .pill.due { background:#f7e9e9; color:var(--danger); }
+  .pill.soon { background:#fdf6e3; color:#8B6914; }
+  .maint-steps { margin:.9rem 0 0; padding:0; list-style:none; counter-reset:passo; }
+  .maint-steps li { position:relative; padding:0 0 .85rem 2.1rem; counter-increment:passo; }
+  .maint-steps li::before { content:counter(passo); position:absolute; left:0; top:0; width:1.5rem; height:1.5rem;
+    border-radius:50%; background:var(--oro); color:#fff; font-size:.8rem; font-weight:600;
+    display:flex; align-items:center; justify-content:center; }
+  .maint-steps .note { display:block; color:var(--muted); font-size:.82rem; margin-top:.25rem; }
+  /* block + width:fit-content: inline-block bastava solo quando il passo aveva
+     anche una nota (che è block e mandava a capo). Senza nota il pulsante
+     finiva appiccicato all'ultima parola del passo. */
+  .maint-steps a.steplink { display:block; width:fit-content; margin-top:.4rem; font-size:.82rem; font-weight:600; }
+  .maint-tech { font-size:.82rem; background:#fdf6e3; border:1px solid var(--oro); border-radius:8px;
+    padding:.5rem .7rem; margin-top:.7rem; }
 </style>
 </head>
 <body>
@@ -1556,6 +1585,7 @@ function adminPageHtml() {
       <button class="tabbtn" id="tabBtnConventions" role="tab" aria-selected="false">Convenzioni</button>
       <button class="tabbtn" id="tabBtnPro" role="tab" aria-selected="false">Professionale</button>
       <button class="tabbtn" id="tabBtnIntegrations" role="tab" aria-selected="false">Integrazioni</button>
+      <button class="tabbtn" id="tabBtnMaintenance" role="tab" aria-selected="false">Manutenzione<span class="tabbadge" id="maintBadge" style="display:none;"></span></button>
     </div>
 
     <div id="tabKeys">
@@ -1768,6 +1798,21 @@ function adminPageHtml() {
       </table>
       </div>
     </div>
+    </div>
+
+    <div id="tabMaintenance" style="display:none;" data-src="https://attestazione.trust.spaziogenesi.org/manutenzione.json">
+      <div class="card">
+        <div class="section-head">
+          <h2>Manutenzione periodica</h2>
+          <span class="loading-inline" id="maintStatus"></span>
+        </div>
+        <p style="color:var(--muted);font-size:.86rem;margin:0 0 1rem;">
+          Le manutenzioni che il servizio richiede a intervalli regolari. Quando una scade
+          arriva un messaggio su Telegram che rimanda qui. Chi apre questa pagina trova
+          cosa fare e in che ordine: non serve sapere altro.
+        </p>
+        <div id="maintList"></div>
+      </div>
     </div>
   </div>
 </div>
