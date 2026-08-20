@@ -1,88 +1,159 @@
-ATTESTATORE DI OPERE
-sistema di notarizzazione opere digitali
+# imgauth — attestation engine for digital works
 
 [![Genesis Trust Score](https://trust.spaziogenesi.org/badge.svg)](https://trust.spaziogenesi.org)
 [![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/SPAZIO-GENESI/imgauth/badge)](https://scorecard.dev/viewer/?uri=github.com/SPAZIO-GENESI/imgauth)
 
-su cloudflare
+*[Versione italiana](./README.it.md) — the Italian README is the original and is kept in sync.*
 
-uso tramite https://attestazione.spaziogenesi.org/ (github pages)
+imgauth is the engine behind
+[attestazione.spaziogenesi.org](https://attestazione.spaziogenesi.org), a
+service run by **Spazio Genesi ETS** (an Italian non-profit) that lets an author
+prove that a specific digital work existed, unchanged, at a specific moment in
+time.
 
-Dalla 1.15.0 il motore attesta un'impronta SHA-256 calcolata sul client
-(full privacy: il file non lascia il dispositivo dell'utente); il campo
-`image` (file inline base64) resta accettato per retrocompatibilità.
+It runs as a Cloudflare Worker and is released under **AGPL-3.0**.
 
-## Accesso per agenti e API key
+## Privacy by design, not as a promise
 
-Dalla 1.16.0, oltre al browser (protetto da Turnstile), `/api/hash` accetta
-anche un bearer token che sblocca il *solo* bypass della challenge anti-bot —
-HMAC, timestamp server e rate limiting per-IP restano invariati per tutti.
+**The work never leaves the author's device.** The browser computes the SHA-256
+digest locally with WebCrypto and sends only that digest — plus the file name,
+type and size the author chooses to declare — to the engine. This is not a
+policy statement: there is no code path that receives the bytes of a work from
+the website. The only channel that ever receives file bytes is the Telegram bot,
+which says so before receiving them.
 
-Due tipi di credenziale, stesso meccanismo (in D1 sta solo l'hash del secret):
+Since version 1.15.0 the digest-only flow is the normal one; an older inline
+field is still accepted for backward compatibility with certificates issued
+before then.
 
-- **API key** (`sg_k_…`) — per partner convenzionati, quota mensile, emessa a
-  mano con `scripts/issue-agent-key.mjs`.
-- **Session token** (`sg_s_…`) — per uso personale/agenti, ottenuto con un
-  *device flow*: l'umano autorizza una volta nel browser (`/agent/authorize`,
-  con Turnstile), l'agente polla `/api/agent/token` e riceve un token valido
-  24h/20 attestazioni.
+## How an attestation is produced
 
-Client di riferimento: [attest-mcp](https://github.com/SPAZIO-GENESI/attest-mcp),
-server MCP che espone il servizio agli agenti AI mantenendo la stessa full
-privacy del sito (hash calcolato in locale, mai i byte del file).
+1. The browser computes `SHA-256` of the chosen work, locally.
+2. `POST /api/hash` — the engine receives the digest, generates a **server-side**
+   timestamp (never a client-supplied one), builds the attestation string
+   `SHA-256:<digest>@<ISO-8601 timestamp>` and signs it with an HMAC token.
+3. `POST /api/cert-pdf` — the engine re-checks that the attestation string is
+   consistent with the digest and timestamp that will be printed, and that the
+   HMAC really signs it; it renders a PDF certificate with a dynamic QR code and
+   sends it to the signing service.
+4. The signing service applies a cryptographic **PKCS#7 / PAdES** signature to
+   the PDF with a certificate from a publicly trusted authority.
+5. The signed PDF is stored and returned. In parallel the digest is anchored to
+   **Bitcoin via OpenTimestamps**, using the protocol's public calendars; the
+   `.ots` proof is downloadable from `GET /api/ots`.
 
-### Chiave API self-service (dalla 1.19.0, LinkedIn dalla 1.20.0)
+Verification (`POST /api/verify`) never needs the file: the browser recomputes
+the digest locally and compares it with the attested one, while the engine
+checks the signature.
 
-Terza via di emissione della stessa `sg_k_…` (non un terzo tipo di
-credenziale): [`/developer/keys`](https://attestazione.spaziogenesi.org/developer/keys/)
-emette una chiave in autonomia dopo aver verificato la tua email con un login
-**one-shot** Google, Microsoft o LinkedIn (scope minimo `openid email` — non è
-un account, non lasciamo cookie né token del provider: una sola chiamata per
-leggere l'email, poi il token viene scartato). Quota 50 attestazioni/mese,
-un'email = una chiave attiva (chiedere a `it@spaziogenesi.org` per revoca o
-quote più alte). Le convenzioni con quote più alte restano manuali via email.
+## What a certificate proves, and by whom it can be checked
 
-## Fascia Professionale (dalla 1.22.0)
+We would rather state this precisely than let a reader assume too much. A
+certificate carries three independent pieces of evidence, and they are **not**
+equally independent today:
 
-Abbonamento annuale a pagamento (Stripe) per chi attesta con continuità:
-200 attestazioni/mese, custodia del certificato garantita per almeno 5 anni.
-Stessa identità "senza account e senza password" delle chiavi self-service —
-la tua email verificata ti autentica, un voucher firmato stateless (mai un
-cookie) vive solo nel browser. Attivazione, stato, log delle ricariche,
-consumo del mese e archivio dei certificati (con il canale con cui ciascuno
-è stato prodotto: sito, API, MCP, bot Telegram) su
-[`/profilo`](https://attestazione.spaziogenesi.org/profilo/). Gestione
-dell'abbonamento (fatture, metodo di pagamento, cessazione) interamente sul
-Customer Portal Stripe — nessun dato di pagamento tocca mai questo Worker.
+| Evidence | Verifiable without us? | Why |
+|---|---|---|
+| PAdES signature on the PDF | **yes** | public X.509 chain, checkable with third-party tools |
+| OpenTimestamps anchor (Bitcoin) | **partly** | the `.ots` proof is issued before Bitcoin confirms; it must be *upgraded* to become a complete, self-contained proof, and that upgrade is not yet automated |
+| Attestation string (HMAC-SHA256) | **no** | a symmetric server-side secret signs it, so only the issuer can verify it |
 
-La catena di precedenza tra le fasce è **convenzione → professionale →
-sviluppatore/base**: mai un blocco, solo un degrado esplicito a quota
-esaurita o scaduta.
+Closing that last gap — a publicly verifiable signature and an offline verifier
+that needs none of our servers — is the main direction of work for this project.
+See the [roadmap](https://github.com/SPAZIO-GENESI/img-auth-hub).
 
-## Documentazione API
+Note that the licence covers the code, not the service: an independent instance
+of this code cannot issue certificates that pass verification against the
+official service, because the secrets that authenticate them are not part of
+this repository.
 
-Contratto completo in formato OpenAPI 3.0: [`/openapi.json`](https://imgauth.spaziogenesi.org/openapi.json)
-(machine-readable, importabile in Postman/Insomnia/Swagger UI) o
-[`/docs`](https://attestazione.spaziogenesi.org/docs/) per la stessa documentazione
-in una pagina leggibile — auto-ospitata, nessuna dipendenza di terze parti.
+## Invariants
 
-## Sicurezza
+Rules that are not changed without an explicit decision by the operator, because
+each of them protects something a user already relies on:
 
-Segnalazioni di vulnerabilità → [`/sicurezza/`](https://attestazione.spaziogenesi.org/sicurezza/)
-(policy di responsible disclosure, safe harbor per la ricerca in buona fede);
-`security.txt` conforme RFC 9116 su
+1. The HMAC secret is **never rotated** — it would invalidate the verification
+   of every certificate already issued.
+2. **Language never enters the signature.** A `lang` parameter selects how pages
+   and PDFs are *rendered*, never what is attested.
+3. The **timestamp is generated by the server**, never by the client.
+4. The user's file **does not leave the device**.
+5. `/api/cert-pdf` does not trust the JSON it receives: it fails closed if the
+   signing secret is missing, and it re-verifies that the attestation is
+   consistent with what will be printed. CORS is a defence for browsers, not for
+   direct clients.
+
+## API
+
+The full contract is published as OpenAPI 3.0 at
+[`/openapi.json`](https://imgauth.spaziogenesi.org/openapi.json) — importable
+into Postman, Insomnia or Swagger UI — and rendered as a readable page at
+[`/docs`](https://attestazione.spaziogenesi.org/docs/), self-hosted with no
+third-party dependency. Field names are in Italian in the real contract and are
+not translated.
+
+### Access for agents and API keys
+
+Besides the browser (protected by a bot challenge), `/api/hash` accepts a bearer
+token that unlocks **only** the challenge bypass — HMAC, server timestamp and
+per-IP rate limiting are unchanged for everyone. Two credential types share one
+mechanism, and the database stores only the hash of the secret:
+
+- **API key** (`sg_k_…`) — for partner organisations, monthly quota.
+- **Session token** (`sg_s_…`) — for personal or agent use, obtained through a
+  device flow: a human authorises once in the browser, the agent then polls for
+  a token valid for 24 hours.
+
+An API key can also be issued **self-service** at
+[`/developer/keys`](https://attestazione.spaziogenesi.org/developer/keys/) after
+a one-shot email verification through Google, Microsoft or LinkedIn (minimum
+`openid email` scope — no account is created, no provider cookie or token is
+kept: one call to read the address, then the token is discarded).
+
+Reference client:
+[attest-mcp](https://github.com/SPAZIO-GENESI/attest-mcp), an MCP server that
+exposes the service to AI agents with the same privacy properties as the website
+— the digest is computed locally, the file bytes never travel.
+
+## Related repositories
+
+| Repository | Role |
+|---|---|
+| [imgauthweb](https://github.com/SPAZIO-GENESI/imgauthweb) | web interface (MIT) |
+| [attest-mcp](https://github.com/SPAZIO-GENESI/attest-mcp) | MCP server and `sg-attest` CLI |
+| [attest-action](https://github.com/SPAZIO-GENESI/attest-action) | GitHub Action |
+| [gtf](https://github.com/SPAZIO-GENESI/gtf) | Genesis Trust Framework — the public trust record of this service |
+| [img-auth-hub](https://github.com/SPAZIO-GENESI/img-auth-hub) | architecture, roadmap and release process |
+
+## Development
+
+```bash
+npm ci
+npx wrangler deploy --dry-run    # builds the Worker without deploying; needs no credentials
+```
+
+Releases go through a pipeline with automated checks, an automatically updated
+staging environment and a **human approval gate** before production; a CI guard
+fails the build if the version in `openapi.json` diverges from `package.json`.
+The process is documented in
+[`docs/DEVOPS.md`](./docs/DEVOPS.md).
+
+## Security
+
+Vulnerability reports →
+[`/sicurezza/`](https://attestazione.spaziogenesi.org/sicurezza/) (responsible
+disclosure policy, safe harbour for good-faith research), or directly to
+`it@spaziogenesi.org`. An RFC 9116 `security.txt` is published at
 [`/.well-known/security.txt`](https://imgauth.spaziogenesi.org/.well-known/security.txt).
 
-## Licenza
+Beyond the policy, this project publishes a verifiable trust record — controls,
+decisions, risks and dated evidence — at
+[attestazione.trust.spaziogenesi.org](https://attestazione.trust.spaziogenesi.org).
+
+## Licence
 
 Copyright (C) 2026 Spazio Genesi ETS.
 
-Questo software è rilasciato sotto licenza **GNU AGPL-3.0** (vedi [LICENSE](LICENSE)):
-puoi usarlo, studiarlo, modificarlo e ridistribuirlo; se lo usi per offrire un
-servizio in rete, devi rendere disponibile il codice sorgente delle tue modifiche.
-
-Nota: la licenza copre il codice, non il servizio. I certificati emessi da
-https://imgauth.spaziogenesi.org sono autenticati da segreti server-side
-(HMAC, certificato di firma) che non fanno parte di questo repository:
-un'istanza indipendente del codice non può emettere certificati che superino
-la verifica del servizio ufficiale.
+Released under the **GNU AGPL-3.0** (see [LICENSE](./LICENSE)): you may use,
+study, modify and redistribute it; if you use it to offer a network service, you
+must make the source of your modifications available.
