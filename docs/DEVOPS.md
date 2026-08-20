@@ -6,18 +6,19 @@ vengono sviluppati, verificati e rilasciati senza mettere a rischio l'unico
 ambiente di produzione. Non contiene segreti né identificatori sensibili:
 può essere pubblicato e citato come evidenza del processo di rilascio.
 
-> Stato: **in implementazione progressiva** — vedi la tabella
-> [Stato di attuazione](#8-stato-di-attuazione) in fondo. Pubblicato qui
-> prima della chiusura completa (5 fasi su 8), per non dare l'impressione
-> di un lavoro fermo: questa copia viene aggiornata ad ogni fase chiusa,
-> non solo alla fine.
+> Stato: **quasi completo** — FASE 0-4, 7 e 8 chiuse; restano solo le FASE
+> 5-6 (staging RADART). Vedi la tabella
+> [Stato di attuazione](#8-stato-di-attuazione) in fondo: questa copia
+> viene aggiornata ad ogni fase chiusa, non solo alla fine.
 >
-> **Versione HTML**: https://attestazione.trust.spaziogenesi.org/devops/ (stile
-> Trust Center, con schemi SVG di parti e flusso; linkata dal footer del
-> Trust Center). Registrato nel [Genesis Trust Framework](https://trust.spaziogenesi.org)
-> come `ADR-P24` e `CTL-cicd-pipeline` (controllo verificabile: i run di
-> CI citati qui sono pubblici, chiunque può controllare che il processo
-> dichiarato sia quello praticato).
+> **Versione HTML**: https://attestazione.trust.spaziogenesi.org/devops/
+> (stile Trust Center, con schemi SVG di parti e flusso; linkata dal
+> footer del Trust Center), dal 2026-08-20 anche in inglese su
+> https://attestazione.trust.spaziogenesi.org/en/devops/. Registrato nel
+> [Genesis Trust Framework](https://trust.spaziogenesi.org) come `ADR-P24`
+> e `CTL-cicd-pipeline` (`status: active` dal 2026-07-11 — controllo
+> verificabile: i run di CI citati qui sono pubblici, chiunque può
+> controllare che il processo dichiarato sia quello praticato).
 
 ---
 
@@ -54,9 +55,9 @@ può essere pubblicato e citato come evidenza del processo di rilascio.
 | — anti-bot Turnstile | chiavi reali | chiavi di test Cloudflare (passano sempre) |
 | — notifiche Telegram | attive | assenti (staging silenzioso) |
 | authweb (interfaccia) | GitHub Pages · attestazione.spaziogenesi.org | copia **generata** dal medesimo sorgente su un secondo sito Pages ([attestazione-staging](https://spazio-genesi.github.io/attestazione-staging/)), puntata a imgauth-staging |
-| radart-api / graph / semantic / ingest | Worker con risorse proprie per modulo | gemelli `-staging` con D1/R2 propri; i service binding di staging puntano ai gemelli |
-| radart-web | Cloudflare Pages (produzione) | preview per-branch native di Pages, con variabili "Preview" puntate a radart-api-staging |
-| attest-mcp | pacchetto npm (client) | non ha ambiente: unit test in CI; per prove d'integrazione si punta allo staging via env |
+| radart-api / graph / semantic / ingest | Worker con risorse proprie per modulo | ⏳ **non ancora replicato** (FASE 5-6, da eseguire): nessun blocco `[env.staging]` nei `wrangler.toml` dei 4 moduli, nessuna D1/R2 `-staging` creata |
+| radart-web | Cloudflare Pages (produzione) | preview per-branch native di Pages disponibili, ma senza un `radart-api-staging` a cui puntare (dipende dalla FASE 5-6 sopra) |
+| attest-mcp | pacchetto npm (client) | non ha ambiente: unit test in CI; le prove d'integrazione puntano a imgauth-staging (quello del motore, già in produzione) |
 
 Scelte deliberate: lo staging **non ha cron attivi** (niente rollup/allarmi
 doppi) e **non ha route** su domini di zona (le route Cloudflare nuove
@@ -70,7 +71,7 @@ sviluppo locale (wrangler dev)
         │  pull request
         ▼
    CI — check automatici          lint/sintassi · validazione contratto
-        │  merge su main             OpenAPI · build dry-run
+        │  merge su main             OpenAPI · build dry-run · CodeQL
         ▼
    deploy STAGING automatico      + smoke test automatico:
         │                            ping · status · hash → cert → recupero
@@ -89,6 +90,13 @@ sviluppo locale (wrangler dev)
         │
         └── in emergenza: wrangler rollback (secondi, senza rebuild)
 ```
+
+CodeQL gira come workflow separato (stesso trigger push/PR su `main`, più
+una cadenza settimanale), aggiunto dal 2026-08-13 (piano P43/A3): non è un
+gate bloccante di questo flusso — non impedisce il merge — ma segnala nuovi
+alert in "Security → Code scanning"; il triage è un processo ricorrente
+separato (`PRC-security-alert-triage`, registro gtf). Dependabot apre PR di
+aggiornamento dipendenze in automatico, indipendenti dalla catena sopra.
 
 Il tag git `vX.Y.Z` sul commit di rilascio resta la convenzione in vigore
 (alimenta l'indicatore di integrità del Genesis Trust Framework).
@@ -175,9 +183,14 @@ Ogni deploy staging esegue automaticamente, e chiunque può ripetere a mano:
 | 5 | Staging RADART (4 worker + preview Pages) | ⏳ da eseguire |
 | 6 | CI RADART | ⏳ da eseguire |
 | 7 | authweb staging (sito Pages generato dal sorgente) | ✅ 2026-07-11 |
-| 8 | Pubblicazione doc + registrazione nel Genesis Trust Framework | 🔶 in corso (questa pagina) |
+| 8 | Pubblicazione doc + registrazione nel Genesis Trust Framework | ✅ 2026-07-11 |
 
 *Questa tabella viene aggiornata alla chiusura di ogni fase (data + esito),
-qui e nella copia interna (`DEVOPS.md`, hub) e nella versione HTML
-([attestazione.trust.spaziogenesi.org/devops/](https://attestazione.trust.spaziogenesi.org/devops/)),
-nello stesso giro.*
+qui e nella copia interna (`DEVOPS.md`, hub) e nelle versioni HTML
+([attestazione.trust.spaziogenesi.org/devops/](https://attestazione.trust.spaziogenesi.org/devops/),
+[/en/devops/](https://attestazione.trust.spaziogenesi.org/en/devops/)),
+nello stesso giro.
+⚠️ **Corretto il 2026-08-20**: questa riga diceva ancora "🔶 in corso" mentre
+la registrazione GTF (`ADR-P24 accepted`, `CTL-cicd-pipeline status: active`)
+risale allo stesso giorno della FASE 0-4/7 — un disallineamento mai
+corretto finora. Restano aperte solo le FASE 5-6 (RADART).*
