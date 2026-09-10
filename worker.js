@@ -2281,11 +2281,122 @@ async function handleVerify(request, env) {
 
 // ── /api/cert-pdf ─────────────────────────────────────────────────────────────
 
+// Stato dichiarato dal firmatario (authart GET /status): serve PRIMA di comporre
+// il PDF, perché la riga sulle garanzie va stampata e poi firmata — non si può
+// aggiungere dopo senza rompere la firma. È una previsione, non una prova: la
+// prova arriva negli header di /sign e, se smentisce quanto stampato, il PDF
+// viene ricomposto (vedi handleCertPdf).
+// Cache in memoria dell'isolate, 5 minuti: authart è su Azure e un cold start
+// non deve pesare su ogni emissione. Fail-soft: senza risposta si resta su
+// "unknown" e la voce marca temporale semplicemente non compare.
+let _signerStatusCache = { at: 0, value: null };
+const SIGNER_STATUS_TTL_MS = 300_000;
+
+async function fetchSignerStatus(env) {
+  if (!env?.SIGNER_URL) return null;
+  const now = Date.now();
+  if (_signerStatusCache.value && now - _signerStatusCache.at < SIGNER_STATUS_TTL_MS) {
+    return _signerStatusCache.value;
+  }
+  const base = String(env.SIGNER_URL).replace(/\/sign\/?$/, "/");
+  const res = await fetchWithTimeout(`${base}status`, 4000, { method: "GET" });
+  if (!res || !res.ok) return null;
+  let json = null;
+  try { json = await res.json(); } catch { return null; }
+  _signerStatusCache = { at: now, value: json };
+  return json;
+}
+
+// Traduce lo stato dichiarato da authart nella previsione di garanzie da stampare.
+function expectedGuarantees(signerStatus, hasSigner, otsUrl) {
+  const g = { pades: !!hasSigner, ots: !!otsUrl, timestamp: { state: "unknown", level: "unknown", host: "" } };
+  if (!hasSigner) { g.timestamp = { state: "absent", level: "none", host: "" }; return g; }
+  if (!signerStatus) return g; // authart muto: non si inventa nulla
+  if (signerStatus.timestamp_configured) {
+    g.timestamp = {
+      state: "applied",
+      level: signerStatus.timestamp_level === "qualified" ? "qualified" : "recognized",
+      host: String(signerStatus.timestamp_host || ""),
+    };
+  } else {
+    g.timestamp = { state: "absent", level: "none", host: "" };
+  }
+  return g;
+}
+
+// Garanzie realmente ottenute, lette dagli header della risposta di authart.
+function actualGuarantees(signRes, expected) {
+  const state = signRes.headers.get("X-Sign-Timestamp");
+  if (!state) return expected; // authart di versione precedente: resta la previsione
+  const level = signRes.headers.get("X-Sign-Timestamp-Level") || "none";
+  const host = signRes.headers.get("X-Sign-Timestamp-Host") || "";
+  return {
+    ...expected,
+    timestamp: state === "applied"
+      ? { state: "applied", level: level === "qualified" ? "qualified" : "recognized", host }
+      : { state: "absent", level: "none", host: "" },
+  };
+}
+
+function sameTimestampGuarantee(a, b) {
+  const x = a?.timestamp || {}, y = b?.timestamp || {};
+  return x.state === y.state && x.level === y.level && (x.host || "") === (y.host || "");
+}
+
 function certFilenameStamp() {
   return new Date().toISOString().replace(/[:.]/g, "-");
 }
 
-async function fillCertificatePdf(d, meta, otsUrl, lang = "it") {
+// ── Garanzie effettive di una singola emissione (P55 §M7) ────────────────────
+// Il certificato non deve promettere in generale: deve elencare ciò che QUESTA
+// emissione ha davvero ottenuto. La marca temporale è l'unica voce che il Worker
+// non conosce con certezza quando compone il PDF (la applica authart, dopo), per
+// questo `certificateGuarantees` accetta uno stato "unknown": in quel caso la
+// voce non viene stampata affatto, invece di essere inventata.
+//
+// forma: { pades: bool, ots: bool, timestamp: { state, level, host } }
+//   state: "applied" | "absent" | "unknown"
+//   level: "qualified" | "recognized" | "none" | "unknown"
+// Etichette delle garanzie: condivise fra il PDF e la pagina pubblica /c/<hash>,
+// così le due rese non possono divergere.
+function guaranteeLabels(en) {
+  return en ? {
+    head:        "Guarantees of this certificate",
+    hmac:        "service HMAC signature",
+    pades:       "PAdES digital signature of the PDF",
+    tsQualified: (host) => `qualified eIDAS timestamp (${host})`,
+    tsRecognised: (host) => `timestamp recognised by PDF readers, not eIDAS-qualified (${host})`,
+    tsNone:      "timestamp not applied to this issuance",
+    ots:         "Bitcoin anchoring (OpenTimestamps)",
+    otsNone:     "Bitcoin anchoring not available for this issuance",
+  } : {
+    head:        "Garanzie di questo certificato",
+    hmac:        "firma HMAC del servizio",
+    pades:       "firma digitale PAdES del PDF",
+    tsQualified: (host) => `marca temporale qualificata eIDAS (${host})`,
+    tsRecognised: (host) => `marca temporale riconosciuta dai lettori PDF, non qualificata eIDAS (${host})`,
+    tsNone:      "marca temporale non applicata a questa emissione",
+    ots:         "ancoraggio Bitcoin (OpenTimestamps)",
+    otsNone:     "ancoraggio Bitcoin non disponibile per questa emissione",
+  };
+}
+
+// Voci da mostrare per una singola emissione. `includeOts` a false dove
+// l'ancoraggio ha già una riga propria (pagina /c/), per non dirlo due volte.
+function guaranteeLines(G, g, includeOts = true) {
+  const items = [G.hmac];
+  if (g?.pades) items.push(G.pades);
+  const ts = g?.timestamp || {};
+  if (ts.state === "applied") {
+    items.push(ts.level === "qualified" ? G.tsQualified(ts.host || "—") : G.tsRecognised(ts.host || "—"));
+  } else if (ts.state === "absent") {
+    items.push(G.tsNone);
+  }
+  if (includeOts) items.push(g?.ots ? G.ots : G.otsNone);
+  return items;
+}
+
+async function fillCertificatePdf(d, meta, otsUrl, lang = "it", guarantees = null) {
   // P42: template per lingua. I nomi dei campi AcroForm sono identici nei due
   // file, quindi tutto il codice sotto resta invariato.
   const doc = await PDFDocument.load(lang === "en" ? certTemplatePdfEn : certTemplatePdf);
@@ -2506,7 +2617,18 @@ async function fillCertificatePdf(d, meta, otsUrl, lang = "it") {
     blockY -= 5;
   }
 
-  // 2) Dettagli tecnici — fine print
+  // 2) Garanzie di questa emissione — ciò che il certificato ha davvero ottenuto,
+  //    non ciò che il servizio offre in generale (P55 §M7). Omesso del tutto se
+  //    il chiamante non ha potuto stabilirle: meglio niente che una promessa.
+  if (guarantees) {
+    const G = guaranteeLabels(en);
+    drawWrapped(G.head, 7.5, oro);
+    blockY -= 1;
+    drawWrapped(guaranteeLines(G, guarantees).join(" · "), 6.5, grigio);
+    blockY -= 4;
+  }
+
+  // 3) Dettagli tecnici — fine print
   drawWrapped(L.techHead, 7.5, oro);
   blockY -= 1;
   if (d.hmac) drawWrapped(`${L.hmacLabel}: ${String(d.hmac)}`, 6.5, grigio);
@@ -2615,9 +2737,15 @@ async function handlePdf(request, env, ctx) {
     // il certificato esce comunque, semplicemente senza la riga OpenTimestamps.
     const otsUrl = await ensureOtsProof(sha256, env);
 
+    // Garanzie previste per QUESTA emissione: authart dichiara in anticipo se e
+    // che tipo di marca temporale applicherà (P55 §M7). Se non risponde, la voce
+    // marca temporale resta "unknown" e non viene stampata.
+    const signerStatus = await fetchSignerStatus(env);
+    let guarantees = expectedGuarantees(signerStatus, !!env?.SIGNER_URL, otsUrl);
+
     // lang: solo la resa delle etichette/prose disegnate a runtime nel PDF —
     // mai la firma HMAC (già verificata sopra su hmacMessage, che ignora lang).
-    const pdfBytes = await fillCertificatePdf(d, meta, otsUrl, lang);
+    let pdfBytes = await fillCertificatePdf(d, meta, otsUrl, lang, guarantees);
 
     let finalBytes = pdfBytes;
 
@@ -2649,6 +2777,43 @@ async function handlePdf(request, env, ctx) {
         }, 503);
       }
       finalBytes = new Uint8Array(await signRes.arrayBuffer());
+
+      // Ciò che authart ha davvero fatto. Se smentisce quanto è stampato sul PDF
+      // (tipicamente: TSA irraggiungibile → fail-open silenzioso, il caso che
+      // P55 §V1 ha trovato in produzione), il certificato viene ricomposto con
+      // la riga vera e rifirmato. Un solo tentativo: se anche il secondo giro
+      // diverge, si tiene quello ottenuto e si registra l'anomalia — un
+      // certificato in meno non serve a nessuno, un certificato che mente sì.
+      const actual = actualGuarantees(signRes, guarantees);
+      if (!sameTimestampGuarantee(actual, guarantees)) {
+        console.warn("[guarantees] previsione smentita da authart:",
+          JSON.stringify(guarantees.timestamp), "→", JSON.stringify(actual.timestamp));
+        _signerStatusCache = { at: 0, value: null }; // la previsione era vecchia: rileggila
+        guarantees = actual;
+        pdfBytes = await fillCertificatePdf(d, meta, otsUrl, lang, guarantees);
+        const retryRes = await fetchWithTimeout(env.SIGNER_URL, 20000, {
+          method: "POST",
+          headers: signHeaders,
+          body: pdfBytes,
+        });
+        if (retryRes && retryRes.ok) {
+          finalBytes = new Uint8Array(await retryRes.arrayBuffer());
+          const retryActual = actualGuarantees(retryRes, guarantees);
+          if (!sameTimestampGuarantee(retryActual, guarantees)) {
+            console.error("[guarantees] divergenza anche al secondo giro:",
+              JSON.stringify(guarantees.timestamp), "→", JSON.stringify(retryActual.timestamp));
+          }
+        } else {
+          // Il secondo giro non è riuscito: resta valido il PDF del primo, che
+          // però dichiara una marca che non ha. Meglio non consegnarlo.
+          console.error("[guarantees] ricomposizione fallita, emissione annullata");
+          return jsonResponse({
+            error: lang === "en"
+              ? "Certificate signing temporarily unavailable. Please try again in a few minutes."
+              : "Firma del certificato temporaneamente non disponibile. Riprova tra qualche minuto.",
+          }, 503);
+        }
+      }
     }
 
     // Chiave R2 con l'hash come prefisso: rende il certificato recuperabile da
@@ -2699,7 +2864,7 @@ async function handlePdf(request, env, ctx) {
         }
       }
       if (ctx && typeof ctx.waitUntil === "function") {
-        ctx.waitUntil(writeCertMeta(env, sha256.toLowerCase(), d, meta, tier, tierConventionId, channel));
+        ctx.waitUntil(writeCertMeta(env, sha256.toLowerCase(), d, meta, tier, tierConventionId, channel, guarantees));
       }
     }
 
@@ -4097,7 +4262,7 @@ async function handleCert(url, env) {
 
 // Sidecar di metadati per la pagina /c/<hash>: i soli campi già stampati sul
 // certificato. Idempotente: preserva la PRIMA emissione. Best-effort.
-async function writeCertMeta(env, hash, d, meta, tier, conventionId, channel) {
+async function writeCertMeta(env, hash, d, meta, tier, conventionId, channel, guarantees = null) {
   const key = `meta/cert/${hash}.json`;
   try {
     if (await env.PDF_ARCHIVE.head(key)) return;
@@ -4116,6 +4281,10 @@ async function writeCertMeta(env, hash, d, meta, tier, conventionId, channel) {
       tier: tier || "base",
       convention_id: conventionId || null,
       channel: channel || null,
+      // Garanzie effettivamente ottenute da QUESTA emissione (P55 §M7). Assenti
+      // sui certificati emessi prima: la pagina /c/ le mostra solo se ci sono,
+      // e non deduce nulla dal loro silenzio.
+      garanzie: guarantees || null,
     };
     await env.PDF_ARCHIVE.put(key, JSON.stringify(payload), {
       httpMetadata: { contentType: "application/json; charset=utf-8" },
@@ -4358,6 +4527,17 @@ function certPageHtml(hash, m, certIso, hasCert, hasOts, lang = "it") {
         ? `<div class="row"><span class="k">Ancoraggio Bitcoin</span><span class="v">OpenTimestamps · <a href="${otsUrl}">scarica prova .ots</a> · <a href="https://opentimestamps.org" target="_blank" rel="noopener">verifica</a></span></div>`
         : `<div class="row"><span class="k">Ancoraggio Bitcoin</span><span class="v muted">non disponibile per questa impronta</span></div>`);
 
+  // Riga garanzie: solo per i certificati emessi dopo P55 §F1, dove il sidecar
+  // registra ciò che l'emissione ha davvero ottenuto. Per i precedenti la riga
+  // non compare: il silenzio del sidecar non autorizza a dedurre nulla.
+  const guaranteeRow = (() => {
+    if (!m?.garanzie) return "";
+    const G = guaranteeLabels(en);
+    const items = guaranteeLines(G, m.garanzie, false);
+    if (!items.length) return "";
+    return `<div class="row"><span class="k">${en ? "Guarantees" : "Garanzie"}</span><span class="v">${escHtml(items.join(" · "))}</span></div>`;
+  })();
+
   const headExtra = en
     ? `<meta property="og:title" content="Verifiable certificate — Spazio Genesi">
 <meta property="og:description" content="Attestation of existence and integrity of a digital work. SHA-256 fingerprint, date, Bitcoin anchoring.">
@@ -4388,6 +4568,7 @@ function certPageHtml(hash, m, certIso, hasCert, hasOts, lang = "it") {
         <div class="row"><span class="k">Attestation date</span><span class="v">${escHtml(dateText)}</span></div>
         ${m?.tipo_mime ? `<div class="row"><span class="k">File type</span><span class="v">${escHtml(m.tipo_mime)}</span></div>` : ""}
         ${otsRow}
+        ${guaranteeRow}
         ${declaredRows ? `<div class="row" style="border:none;padding-bottom:.2rem"><span class="k" style="flex-basis:100%;color:var(--oro);font-weight:600">Author-declared data</span></div>${declaredRows}` : ""}
       </div>
 
@@ -4415,6 +4596,7 @@ function certPageHtml(hash, m, certIso, hasCert, hasOts, lang = "it") {
         <div class="row"><span class="k">Data attestazione</span><span class="v">${escHtml(dateText)}</span></div>
         ${m?.tipo_mime ? `<div class="row"><span class="k">Tipo file</span><span class="v">${escHtml(m.tipo_mime)}</span></div>` : ""}
         ${otsRow}
+        ${guaranteeRow}
         ${declaredRows ? `<div class="row" style="border:none;padding-bottom:.2rem"><span class="k" style="flex-basis:100%;color:var(--oro);font-weight:600">Dati dichiarati dall'autore</span></div>${declaredRows}` : ""}
       </div>
 
