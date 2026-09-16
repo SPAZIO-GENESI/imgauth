@@ -2,7 +2,7 @@
   "openapi": "3.0.3",
   "info": {
     "title": "imgauth — API di attestazione opere digitali",
-    "version": "1.36.0",
+    "version": "1.37.0",
     "description": "Motore di attestazione Spazio Genesi ETS. Full privacy: l'impronta SHA-256 si calcola sul client, il file non viene mai inviato al server. Contratto reale in italiano (non tradurre i nomi campo). Vedi https://attestazione.spaziogenesi.org per l'interfaccia utente e https://github.com/SPAZIO-GENESI/imgauth per il codice sorgente (AGPL-3.0).",
     "contact": { "name": "Spazio Genesi ETS", "url": "https://spaziogenesi.org" },
     "license": { "name": "AGPL-3.0-only", "url": "https://github.com/SPAZIO-GENESI/imgauth/blob/main/LICENSE" }
@@ -64,6 +64,7 @@
             "autore": { "type": "string", "maxLength": 100 },
             "anno": { "type": "string", "maxLength": 50 },
             "note": { "type": "string", "maxLength": 300 },
+            "riserva": { "type": "string", "enum": ["notAllowed", "constrained", "allowed"], "description": "Riserva dei diritti sull'addestramento AI (P55 §F3, dalla 1.37.0), vocabolario CAWG training-mining. Facoltativa, vincolata alla firma HMAC come i metadati; un valore assente o non fra i tre ammessi equivale a nessuna riserva dichiarata (non a 'allowed')." },
             "turnstile_token": { "type": "string", "description": "Richiesto se non c'è credenziale agente e TURNSTILE_SECRET è configurato" },
             "lang": { "type": "string", "enum": ["it", "en"], "description": "Lingua dei messaggi d'errore (P41). Facoltativo, default 'it'; in mancanza si legge Accept-Language. Non influisce sul contenuto attestato né sulla firma HMAC." }
           } } } }
@@ -72,6 +73,7 @@
           "200": { "description": "Attestazione emessa", "content": { "application/json": { "schema": { "type": "object", "properties": {
             "sha256": { "type": "string" }, "dimensione_bytes": { "type": "integer", "nullable": true }, "tipo_mime": { "type": "string" },
             "titolo": { "type": "string" }, "autore": { "type": "string" }, "anno": { "type": "string" }, "note": { "type": "string" },
+            "riserva": { "type": "string", "nullable": true, "enum": ["notAllowed", "constrained", "allowed", null], "description": "Riserva normalizzata e vincolata alla firma HMAC; null se assente o non fra i valori ammessi (P55 §F3)." },
             "timestamp_iso": { "type": "string", "format": "date-time" }, "timestamp_leggibile": { "type": "string" },
             "attestazione": { "type": "string" }, "emesso_da": { "type": "string" }, "hmac": { "type": "string", "nullable": true },
             "fascia": { "type": "string", "enum": ["base", "sviluppatore", "convenzione"], "description": "Fascia effettiva dell'emissione (P25)" },
@@ -94,7 +96,8 @@
           "content": { "multipart/form-data": { "schema": { "type": "object", "properties": {
             "hash": { "type": "string" }, "image": { "type": "string", "format": "binary" },
             "attestazione": { "type": "string" }, "hmac": { "type": "string" },
-            "titolo": { "type": "string" }, "autore": { "type": "string" }, "anno": { "type": "string" }, "note": { "type": "string" }
+            "titolo": { "type": "string" }, "autore": { "type": "string" }, "anno": { "type": "string" }, "note": { "type": "string" },
+            "riserva": { "type": "string", "description": "Riserva dichiarata sul certificato (P55 §F3), se presente: richiesta identica per la verifica HMAC dei certificati che la riportano." }
           }, "required": ["hash"] } } }
         },
         "responses": {
@@ -142,6 +145,24 @@
           "200": { "description": "PDF archiviato", "content": { "application/pdf": { "schema": { "type": "string", "format": "binary" } } } },
           "400": { "description": "hash malformato" },
           "404": { "description": "certificato assente" },
+          "429": { "description": "Rate limit per-IP (60/60s)" },
+          "503": { "description": "archivio non configurato" }
+        }
+      }
+    },
+    "/api/rights": {
+      "get": {
+        "summary": "Riserva dei diritti sull'addestramento AI per un'opera attestata",
+        "description": "Legge la riserva dichiarata al momento dell'attestazione (P55 §F3, dalla 1.37.0), se presente. Stesso modello di fiducia di /api/cert: leggibile solo da chi conosce l'impronta. Pensato per essere consumato anche da terzi (crawler, tool di conformità): CORS aperto.",
+        "parameters": [ { "name": "hash", "in": "query", "required": true, "schema": { "type": "string", "pattern": "^[0-9a-f]{64}$" } } ],
+        "responses": {
+          "200": { "description": "Riserva dichiarata", "content": { "application/json": { "schema": { "type": "object", "properties": {
+            "sha256": { "type": "string" }, "riserva": { "type": "string", "enum": ["notAllowed", "constrained", "allowed"] },
+            "dichiarata_il": { "type": "string", "format": "date-time", "nullable": true }, "certificato": { "type": "string", "format": "uri" },
+            "riferimenti": { "type": "array", "items": { "type": "string" } }, "nota": { "type": "string" }
+          } } } } },
+          "400": { "description": "hash malformato" },
+          "404": { "description": "Impronta sconosciuta, oppure nessuna riserva dichiarata per questa impronta (due errori distinti nel campo `error`)" },
           "429": { "description": "Rate limit per-IP (60/60s)" },
           "503": { "description": "archivio non configurato" }
         }

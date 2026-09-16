@@ -327,13 +327,30 @@ function extractMeta(src) {
   return meta;
 }
 
-// Messaggio firmato dal token HMAC. SENZA metadati coincide con la sola
-// stringa di attestazione → i certificati già emessi (e quelli senza dati
-// dichiarati) restano verificabili con la logica precedente. CON metadati
-// li accoda in forma canonica, vincolandoli alla firma.
-function hmacMessage(attest, meta) {
-  if (!META_FIELDS.some(([k]) => meta[k])) return attest;
-  return attest + "\n" + META_FIELDS.map(([k]) => `${k}:${meta[k]}`).join("\n");
+// ── Riserva dei diritti sull'addestramento AI (P55 §F3) ─────────────────────
+// Un solo campo, tre valori ammessi presi dal vocabolario CAWG (training-mining),
+// così un domani si potrà separare per asse senza rompere le firme già emesse
+// (la riga firmata è `riserva:<valore>`, non `riserva.ai_gen:<valore>`).
+// Un valore ignoto non deve impedire l'emissione: diventa semplicemente
+// assente, come un metadato non fornito — mai un errore qui.
+const RISERVA_VALUES = new Set(["notAllowed", "constrained", "allowed"]);
+function cleanRiserva(v) {
+  const s = String(v ?? "").trim();
+  return RISERVA_VALUES.has(s) ? s : "";
+}
+
+// Messaggio firmato dal token HMAC. SENZA metadati NÉ riserva coincide con la
+// sola stringa di attestazione → i certificati già emessi (e quelli senza dati
+// dichiarati) restano verificabili con la logica precedente. CON metadati li
+// accoda in forma canonica; la riserva, se dichiarata, si accoda per ultima,
+// dopo le eventuali righe dei metadati.
+function hmacMessage(attest, meta, riserva) {
+  const lines = [];
+  if (META_FIELDS.some(([k]) => meta[k])) {
+    lines.push(...META_FIELDS.map(([k]) => `${k}:${meta[k]}`));
+  }
+  if (riserva) lines.push(`riserva:${riserva}`);
+  return lines.length ? `${attest}\n${lines.join("\n")}` : attest;
 }
 
 // ── Autenticazione agenti (bearer token D1-backed, P21) ─────────────────────
@@ -1856,7 +1873,7 @@ export default {
       if (await isRateLimited(env.RL_CERT, ip)) return tooManyResponse();
     } else if (method === "POST" && (path === "/api/hash" || path === "/api/verify" || path === "/api/agent/authorize" || path === "/api/agent/approve")) {
       if (await isRateLimited(env.RL_API, ip)) return tooManyResponse();
-    } else if (method === "GET" && (path === "/api/ots" || path === "/api/cert" || path === "/api/badge" || path === "/api/agent/token" || path === "/api/badge/integration")) {
+    } else if (method === "GET" && (path === "/api/ots" || path === "/api/cert" || path === "/api/rights" || path === "/api/badge" || path === "/api/agent/token" || path === "/api/badge/integration")) {
       if (await isRateLimited(env.RL_API, ip)) return tooManyResponse();
     } else if (method === "GET" && (path === "/integrazioni" || path === "/api/integrations" || path.startsWith("/integrazioni/logo/"))) {
       if (await isRateLimited(env.RL_API, ip)) return tooManyResponse();
@@ -1878,6 +1895,7 @@ export default {
     if (method === "POST" && path === "/api/cert-pdf") return handlePdf(request, env, ctx);
     if (method === "GET"  && path === "/api/ots")      return handleOts(url, env);
     if (method === "GET"  && path === "/api/cert")     return handleCert(url, env);
+    if (method === "GET"  && path === "/api/rights")   return handleRights(url, env);
     if (method === "GET"  && path === "/api/badge")    return handleBadge(url, env);
     if (method === "GET"  && path === "/api/badge/integration") return handleIntegrationBadge(url, env);
     if (method === "GET"  && path === "/integrazioni") return permanentRedirect("https://attestazione.spaziogenesi.org/integrazioni/");
@@ -2130,10 +2148,15 @@ async function handleHash(request, env, ctx) {
     // nella forma canonica firmata (il client li round-trippa a /api/cert-pdf).
     const meta = extractMeta(data);
 
+    // Riserva dei diritti sull'addestramento AI (P55 §F3): facoltativa, tre
+    // valori ammessi, vincolata al token HMAC come i metadati. Un valore
+    // ignoto o assente non è un errore: diventa "nessuna riserva dichiarata".
+    const riserva = cleanRiserva(data.riserva);
+
     // HMAC opzionale
     let hmacSig = null;
     if (env?.HMAC_SECRET) {
-      hmacSig = await signHmac(env.HMAC_SECRET, hmacMessage(attestazione, meta));
+      hmacSig = await signHmac(env.HMAC_SECRET, hmacMessage(attestazione, meta, riserva));
     }
 
     // ── Canale di produzione (P27 §5) ───────────────────────────────────────
@@ -2213,6 +2236,7 @@ async function handleHash(request, env, ctx) {
       dimensione_bytes:    size,
       tipo_mime:           mime,
       ...meta,
+      riserva:             riserva || null,
       sha256:              digest,
       timestamp_iso:       tsIso,
       timestamp_leggibile: tsHuman,
@@ -2264,7 +2288,11 @@ async function handleVerify(request, env) {
         anno:   form.get("anno"),
         note:   form.get("note"),
       });
-      const message = hmacMessage(String(attestazione).trim(), meta);
+      // Riserva dei diritti (P55 §F3): come i metadati, va fornita identica
+      // per la verifica se il certificato la riportava — assente per i
+      // certificati storici e per quelli emessi senza dichiararla.
+      const riserva = cleanRiserva(form.get("riserva"));
+      const message = hmacMessage(String(attestazione).trim(), meta, riserva);
       hmac_valido = await verifyHmac(env.HMAC_SECRET, message, String(hmacClaimed).trim());
     }
 
@@ -2396,7 +2424,33 @@ function guaranteeLines(G, g, includeOts = true) {
   return items;
 }
 
-async function fillCertificatePdf(d, meta, otsUrl, lang = "it", guarantees = null) {
+// ── Riserva dei diritti sull'addestramento AI (P55 §F3) ─────────────────────
+// Etichette condivise fra il PDF e la pagina pubblica /c/<hash>. Il valore è
+// reso in parole piane, mai con verbi come "protegge"/"impedisce" (P55 §F3.6):
+// la dichiarazione è registrata e verificabile, non un meccanismo di blocco.
+function rightsLabels(en) {
+  return en ? {
+    head: "Rights reservation",
+    riservaLabel: "Reservation:",
+    values: {
+      notAllowed:  "the author does not consent to the use of this work for training AI systems",
+      constrained: "the author consents only under conditions to be agreed directly",
+      allowed:     "the author consents",
+    },
+    note: (url) => `Bound to the same signature and date as the certificate. Does not prevent use of the work. Verify: ${url}`,
+  } : {
+    head: "Riserva dei diritti",
+    riservaLabel: "Riserva:",
+    values: {
+      notAllowed:  "l'autore non acconsente all'uso di quest'opera per addestrare sistemi di intelligenza artificiale",
+      constrained: "l'autore acconsente solo a condizioni da concordare direttamente",
+      allowed:     "l'autore acconsente",
+    },
+    note: (url) => `Vincolata alla stessa firma e data del certificato. Non impedisce l'uso dell'opera. Verifica: ${url}`,
+  };
+}
+
+async function fillCertificatePdf(d, meta, otsUrl, lang = "it", guarantees = null, riserva = "") {
   // P42: template per lingua. I nomi dei campi AcroForm sono identici nei due
   // file, quindi tutto il codice sotto resta invariato.
   const doc = await PDFDocument.load(lang === "en" ? certTemplatePdfEn : certTemplatePdf);
@@ -2617,6 +2671,20 @@ async function fillCertificatePdf(d, meta, otsUrl, lang = "it", guarantees = nul
     blockY -= 5;
   }
 
+  // 1.5) Riserva dei diritti sull'addestramento AI (P55 §F3) — solo se
+  //      dichiarata. Margine verificato il 16/09/2026 (vedi P55-DESIGN §F3.5):
+  //      nel caso peggiore (titolo/note al tetto + garanzie complete) restano
+  //      ~15pt liberi sopra il contenuto fisso del modulo.
+  if (riserva) {
+    const R = rightsLabels(en);
+    const rightsUrl = `${API_BASE}/api/rights?hash=${d.sha256 ?? ""}`;
+    drawWrapped(R.head, 8.5, oro);
+    blockY -= 2;
+    drawWrapped(`${R.riservaLabel} ${R.values[riserva] || riserva}`, 8, nero);
+    drawWrapped(R.note(rightsUrl), 6.5, grigio);
+    blockY -= 5;
+  }
+
   // 2) Garanzie di questa emissione — ciò che il certificato ha davvero ottenuto,
   //    non ciò che il servizio offre in generale (P55 §M7). Omesso del tutto se
   //    il chiamante non ha potuto stabilirle: meglio niente che una promessa.
@@ -2724,7 +2792,10 @@ async function handlePdf(request, env, ctx) {
     // I metadati dichiarati entrano nel messaggio firmato: un titolo o un autore
     // diversi da quelli autenticati da /api/hash invalidano la firma → 403.
     const meta = extractMeta(d);
-    const tokenOk = await verifyHmac(env.HMAC_SECRET, hmacMessage(attest, meta), hmac);
+    // Riserva dei diritti (P55 §F3): stesso principio dei metadati — una
+    // riserva diversa da quella autenticata da /api/hash invalida la firma.
+    const riserva = cleanRiserva(d.riserva);
+    const tokenOk = await verifyHmac(env.HMAC_SECRET, hmacMessage(attest, meta, riserva), hmac);
     if (!tokenOk) {
       return jsonResponse({ error: lang === "en" ? "Invalid attestation signature: certificate cannot be issued." : "Firma dell'attestazione non valida: certificato non emettibile." }, 403);
     }
@@ -2745,7 +2816,7 @@ async function handlePdf(request, env, ctx) {
 
     // lang: solo la resa delle etichette/prose disegnate a runtime nel PDF —
     // mai la firma HMAC (già verificata sopra su hmacMessage, che ignora lang).
-    let pdfBytes = await fillCertificatePdf(d, meta, otsUrl, lang, guarantees);
+    let pdfBytes = await fillCertificatePdf(d, meta, otsUrl, lang, guarantees, riserva);
 
     let finalBytes = pdfBytes;
 
@@ -2790,7 +2861,7 @@ async function handlePdf(request, env, ctx) {
           JSON.stringify(guarantees.timestamp), "→", JSON.stringify(actual.timestamp));
         _signerStatusCache = { at: 0, value: null }; // la previsione era vecchia: rileggila
         guarantees = actual;
-        pdfBytes = await fillCertificatePdf(d, meta, otsUrl, lang, guarantees);
+        pdfBytes = await fillCertificatePdf(d, meta, otsUrl, lang, guarantees, riserva);
         const retryRes = await fetchWithTimeout(env.SIGNER_URL, 20000, {
           method: "POST",
           headers: signHeaders,
@@ -2864,7 +2935,7 @@ async function handlePdf(request, env, ctx) {
         }
       }
       if (ctx && typeof ctx.waitUntil === "function") {
-        ctx.waitUntil(writeCertMeta(env, sha256.toLowerCase(), d, meta, tier, tierConventionId, channel, guarantees));
+        ctx.waitUntil(writeCertMeta(env, sha256.toLowerCase(), d, meta, tier, tierConventionId, channel, guarantees, riserva));
       }
     }
 
@@ -4252,6 +4323,52 @@ async function handleCert(url, env) {
   });
 }
 
+// ── /api/rights — riserva dei diritti sull'addestramento AI (P55 §F3) ───────
+// Sola lettura, pubblico: stesso modello di fiducia di /api/cert (ottenibile
+// solo da chi conosce l'impronta). Legge il sidecar già scritto da
+// writeCertMeta: nessuna fonte diversa, nessuna deduzione da campi assenti.
+// CORS aperto (origine *) e cache breve: è fatto per essere letto da terzi
+// (crawler, tool di conformità), stesso principio di withPublicCors.
+function rightsResponse(body, status) {
+  return new Response(JSON.stringify(body, null, 2), {
+    status,
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+      "Access-Control-Allow-Origin": "*",
+      "Cache-Control": "public, max-age=60",
+    },
+  });
+}
+
+async function handleRights(url, env) {
+  const hash = String(url.searchParams.get("hash") ?? "").toLowerCase();
+  if (!HEX64.test(hash)) {
+    return rightsResponse({ error: "Parametro hash mancante o non valido." }, 400);
+  }
+  if (!env?.PDF_ARCHIVE) {
+    return rightsResponse({ error: "Archivio non configurato." }, 503);
+  }
+  let m = null;
+  try {
+    const obj = await env.PDF_ARCHIVE.get(`meta/cert/${hash}.json`);
+    if (obj) m = JSON.parse(await obj.text());
+  } catch { /* trattato come non trovato */ }
+  if (!m) {
+    return rightsResponse({ error: "Impronta sconosciuta: nessuna attestazione in archivio per questo hash." }, 404);
+  }
+  if (!m.riserva) {
+    return rightsResponse({ error: "Nessuna riserva dichiarata per questa impronta." }, 404);
+  }
+  return rightsResponse({
+    sha256: hash,
+    riserva: m.riserva,
+    dichiarata_il: m.dichiarata_il || null,
+    certificato: `${CERT_PAGE_BASE}/c/${hash}`,
+    riferimenti: ["DSM art. 4", "AI Act art. 53"],
+    nota: "Dichiarazione dell'autore registrata all'atto dell'attestazione e vincolata alla firma del certificato. Non impedisce l'uso dell'opera.",
+  }, 200);
+}
+
 // ── /c/<sha256> — certificato verificabile online ────────────────────────────
 // Pagina pubblica e permanente per ogni opera attestata: impronta SHA-256, data,
 // algoritmo, ancoraggio OpenTimestamps (Bitcoin) e QR code. È renderizzata dal
@@ -4262,7 +4379,7 @@ async function handleCert(url, env) {
 
 // Sidecar di metadati per la pagina /c/<hash>: i soli campi già stampati sul
 // certificato. Idempotente: preserva la PRIMA emissione. Best-effort.
-async function writeCertMeta(env, hash, d, meta, tier, conventionId, channel, guarantees = null) {
+async function writeCertMeta(env, hash, d, meta, tier, conventionId, channel, guarantees = null, riserva = "") {
   const key = `meta/cert/${hash}.json`;
   try {
     if (await env.PDF_ARCHIVE.head(key)) return;
@@ -4285,6 +4402,11 @@ async function writeCertMeta(env, hash, d, meta, tier, conventionId, channel, gu
       // sui certificati emessi prima: la pagina /c/ le mostra solo se ci sono,
       // e non deduce nulla dal loro silenzio.
       garanzie: guarantees || null,
+      // Riserva dei diritti sull'addestramento AI (P55 §F3), se dichiarata alla
+      // stessa data dell'attestazione: assente per i certificati precedenti e
+      // per quelli emessi senza dichiararla — l'assenza non equivale ad "allowed".
+      riserva: riserva || null,
+      dichiarata_il: riserva ? String(d.timestamp_iso ?? "") : null,
     };
     await env.PDF_ARCHIVE.put(key, JSON.stringify(payload), {
       httpMetadata: { contentType: "application/json; charset=utf-8" },
@@ -4538,6 +4660,16 @@ function certPageHtml(hash, m, certIso, hasCert, hasOts, lang = "it") {
     return `<div class="row"><span class="k">${en ? "Guarantees" : "Garanzie"}</span><span class="v">${escHtml(items.join(" · "))}</span></div>`;
   })();
 
+  // Riga riserva dei diritti (P55 §F3): solo se dichiarata alla stessa data
+  // dell'attestazione. Il valore in parole piane, con link a /api/rights.
+  const rightsRow = (() => {
+    if (!m?.riserva) return "";
+    const R = rightsLabels(en);
+    const rightsApiUrl = `${API_BASE}/api/rights?hash=${hash}`;
+    const value = R.values[m.riserva] || m.riserva;
+    return `<div class="row"><span class="k">${en ? "Rights reservation" : "Riserva dei diritti"}</span><span class="v">${escHtml(value)} · <a href="${rightsApiUrl}">${en ? "verify" : "verifica"}</a></span></div>`;
+  })();
+
   const headExtra = en
     ? `<meta property="og:title" content="Verifiable certificate — Spazio Genesi">
 <meta property="og:description" content="Attestation of existence and integrity of a digital work. SHA-256 fingerprint, date, Bitcoin anchoring.">
@@ -4569,6 +4701,7 @@ function certPageHtml(hash, m, certIso, hasCert, hasOts, lang = "it") {
         ${m?.tipo_mime ? `<div class="row"><span class="k">File type</span><span class="v">${escHtml(m.tipo_mime)}</span></div>` : ""}
         ${otsRow}
         ${guaranteeRow}
+        ${rightsRow}
         ${declaredRows ? `<div class="row" style="border:none;padding-bottom:.2rem"><span class="k" style="flex-basis:100%;color:var(--oro);font-weight:600">Author-declared data</span></div>${declaredRows}` : ""}
       </div>
 
@@ -4597,6 +4730,7 @@ function certPageHtml(hash, m, certIso, hasCert, hasOts, lang = "it") {
         ${m?.tipo_mime ? `<div class="row"><span class="k">Tipo file</span><span class="v">${escHtml(m.tipo_mime)}</span></div>` : ""}
         ${otsRow}
         ${guaranteeRow}
+        ${rightsRow}
         ${declaredRows ? `<div class="row" style="border:none;padding-bottom:.2rem"><span class="k" style="flex-basis:100%;color:var(--oro);font-weight:600">Dati dichiarati dall'autore</span></div>${declaredRows}` : ""}
       </div>
 
