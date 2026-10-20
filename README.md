@@ -150,6 +150,14 @@ Beyond the policy, this project publishes a verifiable trust record — controls
 decisions, risks and dated evidence — at
 [attestazione.trust.spaziogenesi.org](https://attestazione.trust.spaziogenesi.org).
 
+## Use of generative AI
+
+Parts of this repository are written with generative AI models, under the
+maintainer's direction and review; the maintainer is solely responsible for
+what is published. Commits from 2026-10-20 onward mark such contributions with
+a `Co-Authored-By` and an `AI-Assisted` trailer; earlier history is not
+rewritten. See [the convention](https://github.com/SPAZIO-GENESI/img-auth-hub/blob/main/docs/AI-PROVENANCE.md).
+
 ## Licence
 
 Copyright (C) 2026 Spazio Genesi ETS.

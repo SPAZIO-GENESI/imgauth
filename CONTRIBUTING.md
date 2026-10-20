@@ -17,6 +17,12 @@ agreed before code is written. Pull requests are welcome; keep them small and
 focused, and expect CI (`ci.yml`) to run checks and a staging deploy before
 review.
 
+## Conduct and AI provenance
+
+Participation is governed by the [Code of Conduct](./CODE_OF_CONDUCT.md).
+Commits where a generative AI model wrote or substantially rewrote content carry
+a provenance trailer: see the [convention](https://github.com/SPAZIO-GENESI/img-auth-hub/blob/main/docs/AI-PROVENANCE.md) (in Italian, with an English summary).
+
 ## What to expect
 
 Best-effort review within a couple of weeks. This is a non-profit project run

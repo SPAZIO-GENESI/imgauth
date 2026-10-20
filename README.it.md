@@ -75,6 +75,14 @@ Segnalazioni di vulnerabilità → [`/sicurezza/`](https://attestazione.spazioge
 `security.txt` conforme RFC 9116 su
 [`/.well-known/security.txt`](https://imgauth.spaziogenesi.org/.well-known/security.txt).
 
+## Uso dell'AI generativa
+
+Parti di questo repository sono scritte con modelli di AI generativa, sotto la
+direzione e la revisione del gestore, che è l'unico responsabile di ciò che
+viene pubblicato. I commit dal 20/10/2026 in poi marcano questi contributi con
+i trailer `Co-Authored-By` e `AI-Assisted`; la storia precedente non viene
+riscritta. Vedi [la convenzione](https://github.com/SPAZIO-GENESI/img-auth-hub/blob/main/docs/AI-PROVENANCE.md).
+
 ## Licenza
 
 Copyright (C) 2026 Spazio Genesi ETS.
