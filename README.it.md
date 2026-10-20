@@ -77,11 +77,17 @@ Segnalazioni di vulnerabilità → [`/sicurezza/`](https://attestazione.spazioge
 
 ## Uso dell'AI generativa
 
-Parti di questo repository sono scritte con modelli di AI generativa, sotto la
-direzione e la revisione del gestore, che è l'unico responsabile di ciò che
-viene pubblicato. I commit dal 20/10/2026 in poi marcano questi contributi con
-i trailer `Co-Authored-By` e `AI-Assisted`; la storia precedente non viene
-riscritta. Vedi [la convenzione](https://github.com/SPAZIO-GENESI/img-auth-hub/blob/main/docs/AI-PROVENANCE.md).
+Questo repository è sviluppato con un assistente di programmazione basato su AI
+generativa, sotto la direzione continua di una persona. **La maggior parte delle
+righe — codice e documentazione — è prodotta dal modello.** Un manutentore
+umano imposta il lavoro, decide l'architettura, rivede e collauda ogni modifica
+e risponde di tutto ciò che viene pubblicato.
+
+Il codice già esistente è stato scritto in questo modo *prima* che si adottasse
+la marcatura di provenienza, quindi i commit precedenti non sono marcati. I
+commit dal 20/10/2026 in poi marcano questi contributi con i trailer
+`Co-Authored-By` e `AI-Assisted`; la storia precedente non viene riscritta.
+Vedi [la convenzione](https://github.com/SPAZIO-GENESI/gtf/blob/main/docs/AI-PROVENANCE.md).
 
 ## Licenza
 

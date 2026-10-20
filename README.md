@@ -152,11 +152,16 @@ decisions, risks and dated evidence — at
 
 ## Use of generative AI
 
-Parts of this repository are written with generative AI models, under the
-maintainer's direction and review; the maintainer is solely responsible for
-what is published. Commits from 2026-10-20 onward mark such contributions with
-a `Co-Authored-By` and an `AI-Assisted` trailer; earlier history is not
-rewritten. See [the convention](https://github.com/SPAZIO-GENESI/img-auth-hub/blob/main/docs/AI-PROVENANCE.md).
+This repository is developed with a generative AI coding assistant, under
+continuous human direction. **Most of the lines — code and documentation — are
+produced by the model.** A human maintainer specifies the work, decides the
+architecture, reviews and tests every change, and is accountable for everything
+that is published.
+
+The code that already existed was written this way *before* provenance marking
+was adopted, so earlier commits are not marked. Commits from 2026-10-20 onward
+mark such contributions with a `Co-Authored-By` and an `AI-Assisted` trailer;
+earlier history is not rewritten. See [the convention](https://github.com/SPAZIO-GENESI/gtf/blob/main/docs/AI-PROVENANCE.md).
 
 ## Licence
 
