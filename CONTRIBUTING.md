@@ -21,7 +21,7 @@ review.
 
 Participation is governed by the [Code of Conduct](./CODE_OF_CONDUCT.md).
 Commits where a generative AI model wrote or substantially rewrote content carry
-a provenance trailer: see the [convention](https://github.com/SPAZIO-GENESI/img-auth-hub/blob/main/docs/AI-PROVENANCE.md) (in Italian, with an English summary).
+a provenance trailer: see the [convention](https://github.com/SPAZIO-GENESI/gtf/blob/main/docs/AI-PROVENANCE.md) (in Italian, with an English summary).
 
 ## What to expect
 
