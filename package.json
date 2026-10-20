@@ -1,12 +1,12 @@
 {
   "name": "imgauth",
-  "version": "1.37.0",
-  "description": "AUTENTICATORE DI ORIGINALITA FOTOGRAFICA",
+  "version": "1.38.0",
+  "description": "Digital work attestation engine: SHA-256 fingerprint, server timestamp, HMAC and signed PDF certificate (Cloudflare Worker)",
   "main": "worker.js",
   "scripts": {
     "deploy:preview": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/deploy-preview.ps1 -PreviewAlias test-pdf-certificato-imgauth",
     "deploy:preview:dry": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/deploy-preview.ps1 -PreviewAlias test-pdf-certificato-imgauth -DryRun",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node --import ./test-support/register.mjs --test --disable-warning=MODULE_TYPELESS_PACKAGE_JSON test/worker.test.mjs"
   },
   "repository": {
     "type": "git",

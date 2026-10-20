@@ -68,6 +68,34 @@ Contratto completo in formato OpenAPI 3.0: [`/openapi.json`](https://imgauth.spa
 [`/docs`](https://attestazione.spaziogenesi.org/docs/) per la stessa documentazione
 in una pagina leggibile — auto-ospitata, nessuna dipendenza di terze parti.
 
+## Test: cosa coprono e cosa no
+
+`npm test` usa il runner nativo di Node (nessuna dipendenza in più) e chiama
+`fetch` del Worker con un ambiente finto. Usa un segreto di firma **di prova**
+scritto nel test — mai quello vero — e impronte inventate. Copre:
+
+- la **stringa canonica firmata**, con vettori fissi calcolati in modo
+  indipendente con `node:crypto`: la lingua non ne fa mai parte, la riserva
+  sull'addestramento AI è sempre l'ultima riga;
+- l'andata e ritorno `/api/hash` → `/api/verify` e il rifiuto di un token manomesso;
+- `/api/cert-pdf` **fail-closed**: 503 senza segreto, rifiuto di un'attestazione
+  incoerente con hash e timestamp o con firma errata;
+- il timestamp generato dal server (uno inviato dal client è ignorato);
+- validazione e normalizzazione dei campi dichiarati;
+- il rifiuto di una credenziale bearer errata, senza ripiegare sul controllo anti-bot.
+
+Un `npm test` verde **non** vuol dire «il servizio è verificato». Non copre:
+
+- il **runtime Cloudflare**: i test girano su Node, non su workerd;
+- **D1 e R2 reali**: non c'è un database né un bucket, quindi una colonna mancante
+  o una query sbagliata non verrebbero viste;
+- Turnstile, Stripe, il servizio di firma, OpenTimestamps e la marca RFC 3161;
+- **il rendering del PDF e la firma PAdES**: nei test non si produce nessun certificato;
+- CSP, header all'edge, route e Cloudflare Access (configurazione solo-dashboard).
+
+La pipeline di rilascio aggiunge uno smoke test del percorso felice su staging
+(`scripts/smoke-staging.mjs`).
+
 ## Sicurezza
 
 Segnalazioni di vulnerabilità → [`/sicurezza/`](https://attestazione.spaziogenesi.org/sicurezza/)
